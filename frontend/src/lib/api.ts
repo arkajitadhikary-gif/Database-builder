@@ -144,6 +144,10 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "h
 let sessionToken: string | null = null;
 let sessionTokenPromise: Promise<void> | null = null;
 
+export function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 async function loadSessionToken(): Promise<void> {
   if (sessionTokenPromise) return sessionTokenPromise;
   sessionTokenPromise = invoke<string>("backend_session_token")
@@ -156,12 +160,13 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs = 15000): 
   await loadSessionToken();
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const isFormDataBody = typeof FormData !== "undefined" && init?.body instanceof FormData;
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       ...init,
       signal: init?.signal ?? controller.signal,
       headers: {
-        "Content-Type": "application/json",
+        ...(isFormDataBody ? {} : { "Content-Type": "application/json" }),
         ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
         ...(init?.headers ?? {}),
       },
@@ -198,16 +203,25 @@ export const api = {
   resumeBatch: (id: string) => request<Batch>(`/batches/${id}/resume`, { method: "POST" }),
   cancelBatch: (id: string) => request<Batch>(`/batches/${id}/cancel`, { method: "POST" }),
   retryBatch: (id: string) => request<Batch>(`/batches/${id}/retry`, { method: "POST" }),
+  createUploadBatch: (files: File[], recursive: boolean) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file, file.name));
+    formData.append("recursive", String(recursive));
+    return request<Batch>("/batches/upload", {
+      method: "POST",
+      body: formData,
+    }, 120000);
+  },
   backfillEmbeddings: (limit = 100) =>
     request<EmbeddingBackfillResponse>("/embeddings/backfill", {
       method: "POST",
       body: JSON.stringify({ limit }),
-    }),
+    }, 120000),
   search: (query: string, mode: "lexical" | "semantic" | "hybrid") =>
     request<SearchResponse>("/search", {
       method: "POST",
       body: JSON.stringify({ query, mode, limit: 30 }),
-    }),
+    }, mode === "lexical" ? 15000 : 120000),
 };
 
 export { API_BASE };

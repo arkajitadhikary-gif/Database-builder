@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from uuid import UUID
+import shutil
+from pathlib import Path
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -65,6 +67,77 @@ def _launch_batch(batch_id: UUID) -> None:
             completed.exception()
 
     task.add_done_callback(_cleanup)
+
+
+async def _create_batch_from_discovery(
+    session: AsyncSession,
+    requested_paths: list[str],
+    discovery_paths: list[str],
+    recursive: bool,
+) -> BatchResponse:
+    try:
+        paths = discover_paths(
+            discovery_paths,
+            recursive=recursive,
+            max_files=settings.max_discovered_files,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    if not paths:
+        raise HTTPException(
+            status_code=400,
+            detail="no files were discovered from the supplied paths",
+        )
+    batch = IngestionBatch(
+        state=IngestionState.DISCOVERED,
+        requested_paths=requested_paths,
+        recursive=recursive,
+    )
+    batch.items = [IngestionItem(path=str(path), state=IngestionState.DISCOVERED) for path in paths]
+    session.add(batch)
+    await session.commit()
+    await session.refresh(batch, attribute_names=["items"])
+    _launch_batch(batch.id)
+    return BatchResponse.from_orm(batch)
+
+
+async def _store_uploaded_files(files: list[UploadFile]) -> tuple[Path, list[str], list[str]]:
+    if not files:
+        raise HTTPException(status_code=400, detail="select at least one file")
+    if len(files) > settings.max_discovered_files:
+        raise HTTPException(status_code=413, detail="upload contains too many files")
+
+    upload_root = settings.reference_root / ".web-uploads" / uuid4().hex
+    upload_root.mkdir(parents=True, exist_ok=False)
+    stored_paths: list[str] = []
+    requested_names: list[str] = []
+    try:
+        for index, upload in enumerate(files, start=1):
+            original_name = (upload.filename or f"upload-{index}.bin").replace("\\", "/")
+            safe_name = Path(original_name).name or f"upload-{index}.bin"
+            destination = upload_root / f"{index:04d}-{safe_name}"
+            size = 0
+            try:
+                with destination.open("wb") as handle:
+                    while chunk := await upload.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > settings.max_pdf_bytes:
+                            raise HTTPException(
+                                status_code=413,
+                                detail=(
+                                    "file exceeds configured size limit of "
+                                    f"{settings.max_pdf_bytes} bytes"
+                                ),
+                            )
+                        handle.write(chunk)
+            finally:
+                await upload.close()
+            stored_paths.append(str(destination))
+            requested_names.append(safe_name)
+    except Exception:
+        shutil.rmtree(upload_root, ignore_errors=True)
+        raise
+    return upload_root, stored_paths, requested_names
 
 
 @api_router.get("/setup", response_model=SetupResponse, tags=["setup"])
@@ -130,30 +203,33 @@ async def create_batch(
     payload: BatchCreateRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> BatchResponse:
-    try:
-        paths = discover_paths(
-            payload.paths,
-            recursive=payload.recursive,
-            max_files=settings.max_discovered_files,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=413, detail=str(exc)) from exc
-    if not paths:
-        raise HTTPException(
-            status_code=400,
-            detail="no files were discovered from the supplied paths",
-        )
-    batch = IngestionBatch(
-        state=IngestionState.DISCOVERED,
+    return await _create_batch_from_discovery(
+        session,
         requested_paths=payload.paths,
+        discovery_paths=payload.paths,
         recursive=payload.recursive,
     )
-    batch.items = [IngestionItem(path=str(path), state=IngestionState.DISCOVERED) for path in paths]
-    session.add(batch)
-    await session.commit()
-    await session.refresh(batch, attribute_names=["items"])
-    _launch_batch(batch.id)
-    return BatchResponse.from_orm(batch)
+
+
+@api_router.post(
+    "/batches/upload", response_model=BatchResponse, status_code=202, tags=["ingestion"]
+)
+async def create_uploaded_batch(
+    files: list[UploadFile] = File(...),  # noqa: B008
+    recursive: bool = Form(False),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> BatchResponse:
+    upload_root, stored_paths, requested_names = await _store_uploaded_files(files)
+    try:
+        return await _create_batch_from_discovery(
+            session,
+            requested_paths=requested_names,
+            discovery_paths=stored_paths,
+            recursive=recursive,
+        )
+    except Exception:
+        shutil.rmtree(upload_root, ignore_errors=True)
+        raise
 
 
 @api_router.get("/batches", response_model=list[BatchResponse], tags=["ingestion"])

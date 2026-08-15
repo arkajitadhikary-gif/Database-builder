@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
@@ -38,6 +38,7 @@ import {
   type HealthComponent,
   type PageRecord,
   type SearchResponse,
+  isTauriRuntime,
 } from "./lib/api";
 
 type View =
@@ -216,10 +217,29 @@ function StatusBadge({ value }: { value: string }) {
 
 function ImportView({ onCreated }: { onCreated: () => Promise<void> }) {
   const [paths, setPaths] = useState<string[]>([]);
+  const [webFiles, setWebFiles] = useState<File[]>([]);
   const [recursive, setRecursive] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const webInputRef = useRef<HTMLInputElement>(null);
+  const desktopShell = isTauriRuntime();
+  const handleWebSelection = (event: ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(event.target.files ?? []);
+    setWebFiles((current) => {
+      const combined = [...current, ...selected];
+      return combined.filter(
+        (file, index, files) =>
+          files.findIndex((candidate) => `${candidate.name}:${candidate.size}:${candidate.lastModified}` === `${file.name}:${file.size}:${file.lastModified}`) === index,
+      );
+    });
+    event.target.value = "";
+  };
   const chooseFiles = async () => {
+    if (!desktopShell) {
+      webInputRef.current?.removeAttribute("webkitdirectory");
+      webInputRef.current?.click();
+      return;
+    }
     try {
       const selected = await open({ multiple: true, directory: false, filters: [{ name: "PDF documents", extensions: ["pdf"] }] });
       const values = Array.isArray(selected) ? selected : selected ? [selected] : [];
@@ -227,19 +247,33 @@ function ImportView({ onCreated }: { onCreated: () => Promise<void> }) {
     } catch (reason) { setMessage(reason instanceof Error ? reason.message : "Native file selection is unavailable"); }
   };
   const chooseFolder = async () => {
+    if (!desktopShell) {
+      webInputRef.current?.setAttribute("webkitdirectory", "");
+      webInputRef.current?.click();
+      return;
+    }
     try {
       const selected = await open({ multiple: false, directory: true });
       if (typeof selected === "string") setPaths((current) => [...new Set([...current, selected])]);
     } catch (reason) { setMessage(reason instanceof Error ? reason.message : "Native folder selection is unavailable"); }
   };
   const createBatch = async () => {
-    if (!paths.length) { setMessage("Choose at least one file or folder before starting."); return; }
+    if (desktopShell && !paths.length) { setMessage("Choose at least one file or folder before starting."); return; }
+    if (!desktopShell && !webFiles.length) { setMessage("Choose at least one PDF before starting."); return; }
     setSubmitting(true); setMessage(null);
-    try { await api.createBatch(paths, recursive); setPaths([]); setMessage("Batch created. Track the persisted stages in Ingestion jobs."); await onCreated(); }
+    try {
+      if (desktopShell) {
+        await api.createBatch(paths, recursive);
+      } else {
+        await api.createUploadBatch(webFiles, recursive);
+      }
+      setPaths([]); setWebFiles([]); setMessage("Batch created. Track the persisted stages in Ingestion jobs."); await onCreated();
+    }
     catch (reason) { setMessage(reason instanceof Error ? reason.message : "Unable to create the batch"); }
     finally { setSubmitting(false); }
   };
-  return <section className="import-layout"><div className="panel import-panel"><div className="drop-zone"><div className="drop-icon"><UploadCloud size={28} /></div><h3>Bring in source documents</h3><p>Select individual PDFs or a folder. The backend receives filesystem paths directly and processes the corpus incrementally.</p><div className="import-actions"><button className="primary-button" onClick={() => void chooseFiles()}><FileSearch size={17} /> Choose PDFs</button><button className="secondary-button" onClick={() => void chooseFolder()}><FolderOpen size={17} /> Choose folder</button></div></div><div className="import-options"><label className="checkbox-label"><input type="checkbox" checked={recursive} onChange={(event) => setRecursive(event.target.checked)} /> Include nested folders</label><span>Unsupported files are recorded as SKIPPED_UNSUPPORTED.</span></div>{paths.length > 0 && <div className="staged-list"><div className="staged-header"><strong>Staged paths</strong><span>{paths.length}</span></div>{paths.map((path) => <div className="staged-path" key={path}><HardDrive size={15} /><span title={path}>{path}</span><button onClick={() => setPaths((current) => current.filter((value) => value !== path))} aria-label={`Remove ${path}`}><XCircle size={15} /></button></div>)}<button className="primary-button full-width" onClick={() => void createBatch()} disabled={submitting}>{submitting ? "Creating batch…" : "Start durable ingestion"}</button></div>}{message && <div className="inline-message">{message}</div>}</div><div className="side-stack"><div className="panel"><PanelHeader title="Pipeline contract" /><div className="pipeline-list">{["Discover and validate", "Extract pages / OCR when needed", "Classify and parse structure", "Persist provenance and chunks", "Index text and embeddings", "Validate durable result"].map((step, index) => <div className="pipeline-step" key={step}><span>{String(index + 1).padStart(2, "0")}</span><strong>{step}</strong><ChevronRight size={15} /></div>)}</div></div><div className="notice-card"><ShieldCheck size={19} /><div><strong>Source PDFs remain authoritative</strong><p>Reference mode stores paths and hashes. Originals are never modified or deleted automatically.</p></div></div></div></section>;
+  const stagedCount = desktopShell ? paths.length : webFiles.length;
+  return <section className="import-layout"><div className="panel import-panel"><input ref={webInputRef} type="file" accept=".pdf,application/pdf" multiple onChange={handleWebSelection} hidden /><div className="drop-zone"><div className="drop-icon"><UploadCloud size={28} /></div><h3>Bring in source documents</h3><p>{desktopShell ? "Select individual PDFs or a folder. The backend receives filesystem paths directly and processes the corpus incrementally." : "Select PDFs from this browser. A local copy is sent to the local backend for durable ingestion."}</p><div className="import-actions"><button className="primary-button" onClick={() => void chooseFiles()}><FileSearch size={17} /> Choose PDFs</button><button className="secondary-button" onClick={() => void chooseFolder()}><FolderOpen size={17} /> Choose folder</button></div></div><div className="import-options"><label className="checkbox-label"><input type="checkbox" checked={recursive} onChange={(event) => setRecursive(event.target.checked)} /> Include nested folders</label><span>Unsupported files are recorded as SKIPPED_UNSUPPORTED.</span></div>{stagedCount > 0 && <div className="staged-list"><div className="staged-header"><strong>{desktopShell ? "Staged paths" : "Selected files"}</strong><span>{stagedCount}</span></div>{desktopShell ? paths.map((path) => <div className="staged-path" key={path}><HardDrive size={15} /><span title={path}>{path}</span><button onClick={() => setPaths((current) => current.filter((value) => value !== path))} aria-label={`Remove ${path}`}><XCircle size={15} /></button></div>) : webFiles.map((file) => <div className="staged-path" key={`${file.name}:${file.size}:${file.lastModified}`}><HardDrive size={15} /><span title={file.webkitRelativePath || file.name}>{file.webkitRelativePath || file.name}</span><button onClick={() => setWebFiles((current) => current.filter((value) => value !== file))} aria-label={`Remove ${file.name}`}><XCircle size={15} /></button></div>)}<button className="primary-button full-width" onClick={() => void createBatch()} disabled={submitting}>{submitting ? "Creating batch…" : "Start durable ingestion"}</button></div>}{message && <div className="inline-message">{message}</div>}</div><div className="side-stack"><div className="panel"><PanelHeader title="Pipeline contract" /><div className="pipeline-list">{["Discover and validate", "Extract pages / OCR when needed", "Classify and parse structure", "Persist provenance and chunks", "Index text and embeddings", "Validate durable result"].map((step, index) => <div className="pipeline-step" key={step}><span>{String(index + 1).padStart(2, "0")}</span><strong>{step}</strong><ChevronRight size={15} /></div>)}</div></div><div className="notice-card"><ShieldCheck size={19} /><div><strong>{desktopShell ? "Source PDFs remain authoritative" : "Browser import stays local"}</strong><p>{desktopShell ? "Reference mode stores paths and hashes. Originals are never modified or deleted automatically." : "Selected files are copied only to this local backend; no external upload is involved."}</p></div></div></div></section>;
 }
 
 function JobsView({ batches, onChanged }: { batches: Batch[]; onChanged: () => Promise<void> }) {
