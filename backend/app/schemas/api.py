@@ -28,6 +28,11 @@ class DatabaseOverviewResponse(BaseModel):
     tables: list[DatabaseTableResponse]
 
 
+class DatabaseTablePageResponse(DatabaseTableResponse):
+    offset: int
+    limit: int
+
+
 class BatchCreateRequest(BaseModel):
     paths: list[str] = Field(min_length=1)
     recursive: bool = False

@@ -31,6 +31,7 @@ from app.schemas.api import (
     BatchItemResponse,
     BatchResponse,
     DatabaseOverviewResponse,
+    DatabaseTablePageResponse,
     DatabaseTableResponse,
     DocumentResponse,
     DocumentStructureResponse,
@@ -337,6 +338,204 @@ async def database_overview(
         ),
     ]
     return DatabaseOverviewResponse(tables=tables)
+
+
+@api_router.get(
+    "/database/tables/{table_key}",
+    response_model=DatabaseTablePageResponse,
+    tags=["database"],
+)
+async def database_table(
+    table_key: str,
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> DatabaseTablePageResponse:
+    """Read a page of an allow-listed table for the spreadsheet-style viewer."""
+    labels = {
+        "documents": "Documents",
+        "pages": "Pages",
+        "chunks": "Chunks",
+        "references": "References",
+        "ingestion_batches": "Ingestion batches",
+        "ingestion_items": "Ingestion items",
+        "embeddings": "Embeddings metadata",
+    }
+    models = {
+        "documents": Document,
+        "pages": Page,
+        "chunks": Chunk,
+        "references": Reference,
+        "ingestion_batches": IngestionBatch,
+        "ingestion_items": IngestionItem,
+        "embeddings": Embedding,
+    }
+    if table_key not in labels:
+        raise HTTPException(
+            status_code=404, detail="table is not available in the read-only viewer"
+        )
+    model = models[table_key]
+    count = await _table_count(session, model)
+
+    if table_key == "documents":
+        columns = [
+            "id", "source_id", "filename", "sha256", "normalized_text_hash", "byte_size",
+            "page_count", "document_type", "classification_method", "classification_confidence",
+            "title", "document_date", "missing_source", "created_at", "updated_at",
+        ]
+        rows = (
+            await session.scalars(
+                select(Document).order_by(Document.created_at).offset(offset).limit(limit)
+            )
+        ).all()
+        values = [
+            _database_row(
+                id=row.id, source_id=row.source_id, filename=row.filename, sha256=row.sha256,
+                normalized_text_hash=row.normalized_text_hash, byte_size=row.byte_size,
+                page_count=row.page_count, document_type=row.document_type,
+                classification_method=row.classification_method,
+                classification_confidence=row.classification_confidence, title=row.title,
+                document_date=row.document_date, missing_source=row.missing_source,
+                created_at=row.created_at, updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+    elif table_key == "pages":
+        columns = [
+            "id", "document_id", "page_number", "raw_text", "normalized_text",
+            "extraction_method", "text_start_offset", "text_end_offset", "ocr_engine",
+            "ocr_confidence", "warnings", "created_at", "updated_at",
+        ]
+        rows = (
+            await session.scalars(
+                select(Page).order_by(Page.created_at).offset(offset).limit(limit)
+            )
+        ).all()
+        values = [
+            _database_row(
+                id=row.id, document_id=row.document_id, page_number=row.page_number,
+                raw_text=row.raw_text, normalized_text=row.normalized_text,
+                extraction_method=row.extraction_method, text_start_offset=row.text_start_offset,
+                text_end_offset=row.text_end_offset, ocr_engine=row.ocr_engine,
+                ocr_confidence=row.ocr_confidence, warnings=row.warnings,
+                created_at=row.created_at, updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+    elif table_key == "chunks":
+        columns = [
+            "id", "document_id", "chunk_index", "text", "normalized_text", "document_type",
+            "section_label", "paragraph_number", "page_start", "page_end", "source_path",
+            "char_count", "token_count", "created_at", "updated_at",
+        ]
+        rows = (
+            await session.scalars(
+                select(Chunk).order_by(Chunk.created_at).offset(offset).limit(limit)
+            )
+        ).all()
+        values = [
+            _database_row(
+                id=row.id, document_id=row.document_id, chunk_index=row.chunk_index,
+                text=row.text, normalized_text=row.normalized_text, document_type=row.document_type,
+                section_label=row.section_label, paragraph_number=row.paragraph_number,
+                page_start=row.page_start, page_end=row.page_end, source_path=row.source_path,
+                char_count=row.char_count, token_count=row.token_count,
+                created_at=row.created_at, updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+    elif table_key == "references":
+        columns = [
+            "id", "document_id", "source_text", "reference_type", "normalized_key",
+            "resolution_status", "target_document_id", "page_start", "page_end",
+            "created_at", "updated_at",
+        ]
+        rows = (
+            await session.scalars(
+                select(Reference).order_by(Reference.created_at).offset(offset).limit(limit)
+            )
+        ).all()
+        values = [
+            _database_row(
+                id=row.id, document_id=row.document_id, source_text=row.source_text,
+                reference_type=row.reference_type, normalized_key=row.normalized_key,
+                resolution_status=row.resolution_status, target_document_id=row.target_document_id,
+                page_start=row.page_start, page_end=row.page_end,
+                created_at=row.created_at, updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+    elif table_key == "ingestion_batches":
+        columns = [
+            "id", "state", "requested_paths", "recursive", "pause_requested",
+            "cancel_requested", "started_at", "completed_at", "created_at", "updated_at",
+        ]
+        rows = (
+            await session.scalars(
+                select(IngestionBatch).order_by(IngestionBatch.created_at).offset(offset).limit(limit)
+            )
+        ).all()
+        values = [
+            _database_row(
+                id=row.id, state=row.state, requested_paths=row.requested_paths,
+                recursive=row.recursive, pause_requested=row.pause_requested,
+                cancel_requested=row.cancel_requested, started_at=row.started_at,
+                completed_at=row.completed_at, created_at=row.created_at, updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+    elif table_key == "ingestion_items":
+        columns = [
+            "id", "batch_id", "path", "state", "attempts", "locked_at", "last_error",
+            "document_id", "created_at", "updated_at",
+        ]
+        rows = (
+            await session.scalars(
+                select(IngestionItem).order_by(IngestionItem.created_at).offset(offset).limit(limit)
+            )
+        ).all()
+        values = [
+            _database_row(
+                id=row.id, batch_id=row.batch_id, path=row.path, state=row.state,
+                attempts=row.attempts, locked_at=row.locked_at, last_error=row.last_error,
+                document_id=row.document_id, created_at=row.created_at, updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+    else:
+        columns = [
+            "id",
+            "chunk_id",
+            "provider",
+            "model",
+            "version",
+            "dimension",
+            "created_at",
+            "updated_at",
+        ]
+        rows = (
+            await session.scalars(
+                select(Embedding).order_by(Embedding.created_at).offset(offset).limit(limit)
+            )
+        ).all()
+        values = [
+            _database_row(
+                id=row.id, chunk_id=row.chunk_id, provider=row.provider, model=row.model,
+                version=row.version, dimension=row.dimension, created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+
+    return DatabaseTablePageResponse(
+        key=table_key,
+        label=labels[table_key],
+        count=count,
+        offset=offset,
+        limit=limit,
+        columns=columns,
+        rows=values,
+    )
 
 
 @api_router.get("/setup", response_model=SetupResponse, tags=["setup"])

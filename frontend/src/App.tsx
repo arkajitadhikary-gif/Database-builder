@@ -26,6 +26,7 @@ import {
   ShieldCheck,
   Square,
   Sun,
+  Table2,
   UploadCloud,
   XCircle,
 } from "lucide-react";
@@ -34,6 +35,7 @@ import {
   type Batch,
   type BatchItem,
   type DatabaseTable,
+  type DatabaseTablePage,
   type DocumentRecord,
   type DocumentStructure,
   type HealthComponent,
@@ -52,6 +54,7 @@ type View =
   | "judgments"
   | "failures"
   | "database"
+  | "table-explorer"
   | "settings";
 type SearchMode = "lexical" | "semantic" | "hybrid";
 
@@ -67,6 +70,7 @@ const navigation: NavigationItem[] = [
   { id: "judgments", label: "Judgments", icon: FileSearch },
   { id: "failures", label: "Failures", icon: XCircle },
   { id: "database", label: "Database", icon: Database },
+  { id: "table-explorer", label: "Table explorer", icon: Table2 },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -168,6 +172,7 @@ function App() {
         {view === "judgments" && <LibraryView documents={documents.filter((document) => document.document_type.includes("JUDGMENT") || document.document_type === "TRIBUNAL_DECISION")} emptyMessage="No judgment documents have been ingested yet." onSelectDocument={setSelectedDocument} />}
         {view === "failures" && <FailureView batches={batches} />}
         {view === "database" && <DatabaseView setup={setup} documents={documents} />}
+        {view === "table-explorer" && <TableExplorerView />}
         {view === "settings" && <SettingsView setup={setup} />}
       </main>
       {selectedDocument && <DocumentInspector document={selectedDocument} onClose={() => setSelectedDocument(null)} />}
@@ -368,6 +373,45 @@ function DatabaseView({ setup, documents }: { setup: HealthComponent[]; document
   }, [loadTables]);
   const selected = tables.find((table) => table.key === selectedKey) ?? tables[0];
   return <section className="database-layout"><div className="content-grid"><div className="panel large-panel"><PanelHeader title="Database and subsystem health" />{setup.map((item) => <HealthRow key={item.name} item={item} />)}</div><div className="panel"><PanelHeader title="Canonical counts" /><div className="count-list"><div><span>Documents</span><strong>{documents.length}</strong></div><div><span>Pages</span><strong>{documents.reduce((total, document) => total + document.page_count, 0)}</strong></div><div><span>Database truth</span><StatusBadge value="POSTGRESQL" /></div></div></div></div><div className="panel database-browser"><div className="panel-header"><div><h3>Read-only data browser</h3><p className="panel-intro">Bounded previews of canonical PostgreSQL tables. No write or destructive actions are exposed.</p></div><button className="icon-button" onClick={() => void loadTables()} aria-label="Refresh database viewer" title="Refresh database viewer"><RefreshCw size={16} /></button></div>{loading && <div className="loading-state"><LoaderCircle className="spin" size={18} /> Loading table snapshot…</div>}{error && <div className="error-banner"><XCircle size={17} />{error}</div>}{!loading && !error && <><div className="database-tabs">{tables.map((table) => <button key={table.key} className={selected?.key === table.key ? "active" : ""} onClick={() => setSelectedKey(table.key)}>{table.label}<span>{table.count}</span></button>)}</div>{selected && <><div className="database-table-meta"><span>{selected.count} total rows · showing latest {selected.rows.length}</span><span>Read only</span></div>{selected.rows.length === 0 ? <EmptyState text="This table is currently empty." /> : <div className="table-wrap database-table"><table><thead><tr>{selected.columns.map((column) => <th key={column}>{column.replaceAll("_", " ")}</th>)}</tr></thead><tbody>{selected.rows.map((row, index) => <tr key={`${selected.key}-${String(row.id ?? index)}`}>{selected.columns.map((column) => <td key={column} title={String(row[column] ?? "—")}>{row[column] == null ? "—" : String(row[column])}</td>)}</tr>)}</tbody></table></div>}</>}</>}</div></section>;
+}
+
+function formatCell(value: unknown): string {
+  if (value == null) return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function TableExplorerView() {
+  const [tables, setTables] = useState<DatabaseTable[]>([]);
+  const [selectedKey, setSelectedKey] = useState("");
+  const [table, setTable] = useState<DatabaseTablePage | null>(null);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [wrapCells, setWrapCells] = useState(false);
+  const pageSize = 200;
+
+  useEffect(() => {
+    void api.getDatabaseOverview().then((result) => {
+      setTables(result.tables);
+      setSelectedKey((current) => current || result.tables[0]?.key || "");
+    }).catch((reason) => setError(reason instanceof Error ? reason.message : "Table list unavailable"));
+  }, []);
+
+  useEffect(() => {
+    if (!selectedKey) return;
+    setLoading(true);
+    void api.getDatabaseTable(selectedKey, offset, pageSize).then((result) => {
+      setTable(result);
+      setError(null);
+    }).catch((reason) => setError(reason instanceof Error ? reason.message : "Table unavailable"))
+      .finally(() => setLoading(false));
+  }, [offset, selectedKey]);
+
+  const selectTable = (key: string) => { setSelectedKey(key); setOffset(0); };
+  const totalPages = table ? Math.max(1, Math.ceil(table.count / pageSize)) : 1;
+  const currentPage = table ? Math.floor(table.offset / pageSize) + 1 : 1;
+  return <section className="table-explorer-layout"><div className="panel explorer-heading"><div><span className="hero-kicker">PostgreSQL / read only</span><h2>Table explorer</h2><p>Inspect complete allow-listed table pages in a spreadsheet-style grid. Nothing here can write, delete, or reset data.</p></div><div className="explorer-badge"><Table2 size={22} /><strong>{tables.length}</strong><span>tables available</span></div></div><div className="panel spreadsheet-panel"><div className="panel-header"><div><h3>Data grid</h3><p className="panel-intro">Rows {table ? `${table.offset + 1}–${Math.min(table.offset + table.rows.length, table.count)} of ${table.count}` : "—"}. Use both scrollbars to inspect wide and long records.</p></div><label className="wrap-toggle"><input type="checkbox" checked={wrapCells} onChange={(event) => setWrapCells(event.target.checked)} /> Wrap long cells</label></div><div className="database-tabs explorer-tabs">{tables.map((item) => <button key={item.key} className={selectedKey === item.key ? "active" : ""} onClick={() => selectTable(item.key)}>{item.label}<span>{item.count}</span></button>)}</div>{error && <div className="error-banner"><XCircle size={17} />{error}</div>}{loading && <div className="loading-state"><LoaderCircle className="spin" size={18} /> Loading table page…</div>}{!loading && table && <><div className="spreadsheet-scroll"><table className={wrapCells ? "spreadsheet-table wrap-cells" : "spreadsheet-table"}><thead><tr><th className="row-number-header">#</th>{table.columns.map((column) => <th key={column}>{column.replaceAll("_", " ")}</th>)}</tr></thead><tbody>{table.rows.length === 0 ? <tr><td colSpan={table.columns.length + 1}><EmptyState text="This table is empty." /></td></tr> : table.rows.map((row, index) => <tr key={`${table.key}-${String(row.id ?? index)}`}><td className="row-number">{table.offset + index + 1}</td>{table.columns.map((column) => <td key={column} title={formatCell(row[column])}>{formatCell(row[column])}</td>)}</tr>)}</tbody></table></div><div className="spreadsheet-footer"><span>Page {currentPage} of {totalPages}</span><div><button className="small-button" onClick={() => setOffset(Math.max(0, offset - pageSize))} disabled={offset === 0}>Previous</button><button className="small-button" onClick={() => setOffset(offset + pageSize)} disabled={!table || offset + table.rows.length >= table.count}>Next</button></div></div></>}</div></section>;
 }
 
 function SettingsView({ setup }: { setup: HealthComponent[] }) {

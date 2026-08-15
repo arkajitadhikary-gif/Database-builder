@@ -175,6 +175,32 @@ td code { display: block; margin-top: 4px; }
 .database-table th { position: sticky; top: 0; background: var(--panel); z-index: 1; padding-top: 11px; }
 .database-table td { max-width: 270px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: "IBM Plex Mono", monospace; font-size: .66rem; }
 .database-table td:first-child { color: var(--muted); }
+.table-explorer-layout { padding-top: 28px; }
+.explorer-heading { display: flex; align-items: center; justify-content: space-between; gap: 28px; }
+.explorer-heading h2 { font-size: 1.72rem; }
+.explorer-heading p { color: var(--muted); max-width: 690px; margin-top: 11px; line-height: 1.5; font-size: .8rem; }
+.explorer-badge { display: grid; grid-template-columns: auto auto; column-gap: 10px; align-items: center; min-width: 150px; padding: 13px 15px; border: 1px solid var(--line); border-radius: 9px; color: var(--accent); background: var(--soft); }
+.explorer-badge svg { grid-row: span 2; }
+.explorer-badge strong { font-size: 1.2rem; color: var(--ink); }
+.explorer-badge span { color: var(--muted); font-size: .67rem; }
+.spreadsheet-panel { padding: 18px; }
+.spreadsheet-panel .panel-header { align-items: flex-start; margin-bottom: 13px; }
+.wrap-toggle { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: .72rem; white-space: nowrap; }
+.wrap-toggle input { accent-color: var(--accent); }
+.explorer-tabs { max-height: 76px; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 11px; }
+.spreadsheet-scroll { max-height: calc(100vh - 380px); min-height: 360px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.spreadsheet-table { min-width: max-content; border-collapse: separate; border-spacing: 0; font-family: "IBM Plex Mono", monospace; font-size: .68rem; }
+.spreadsheet-table th, .spreadsheet-table td { min-width: 145px; max-width: 330px; padding: 9px 11px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
+.spreadsheet-table th { position: sticky; top: 0; z-index: 2; background: var(--soft); color: var(--muted); padding-top: 10px; padding-bottom: 10px; }
+.spreadsheet-table td { color: var(--ink); }
+.spreadsheet-table tr:hover td { background: var(--soft); }
+.spreadsheet-table .row-number-header, .spreadsheet-table .row-number { position: sticky; left: 0; z-index: 3; min-width: 48px; width: 48px; text-align: right; color: #8a96a8; background: var(--soft); }
+.spreadsheet-table .row-number-header { z-index: 4; }
+.spreadsheet-table.wrap-cells td { max-width: 520px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.spreadsheet-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; color: var(--muted); font-size: .72rem; }
+.spreadsheet-footer > div { display: flex; gap: 7px; }
+.dark .database-tabs button:hover, .dark .database-tabs button.active { background: #212b4b; }
+.dark .spreadsheet-table th, .dark .spreadsheet-table .row-number { background: #1b2534; }
 .settings-grid { padding-top: 28px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .65fr); gap: 18px; }
 @media (max-width: 1280px) { .main-content { padding-left: 30px; padding-right: 30px; } .hero-illustration { width: 190px; } }
 

@@ -145,11 +145,16 @@ export interface DatabaseTable {
   label: string;
   count: number;
   columns: string[];
-  rows: Record<string, string | number | null>[];
+  rows: Record<string, unknown>[];
 }
 
 export interface DatabaseOverview {
   tables: DatabaseTable[];
+}
+
+export interface DatabaseTablePage extends DatabaseTable {
+  offset: number;
+  limit: number;
 }
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8765/api/v1";
@@ -207,6 +212,8 @@ export const api = {
   getPages: (id: string) => request<PageRecord[]>(`/documents/${id}/pages`),
   getStructure: (id: string) => request<DocumentStructure>(`/documents/${id}/structure`),
   getDatabaseOverview: () => request<DatabaseOverview>("/database/overview", undefined, 30000),
+  getDatabaseTable: (key: string, offset = 0, limit = 200) =>
+    request<DatabaseTablePage>(`/database/tables/${encodeURIComponent(key)}?offset=${offset}&limit=${limit}`, undefined, 30000),
   createBatch: (paths: string[], recursive: boolean) =>
     request<Batch>("/batches", {
       method: "POST",
