@@ -36,12 +36,14 @@ import {
   type BatchItem,
   type DatabaseTable,
   type DatabaseTablePage,
+  type DatabaseRecord,
   type DocumentRecord,
   type DocumentStructure,
   type HealthComponent,
   type PageRecord,
   type SearchResponse,
   isTauriRuntime,
+  type VerificationReview,
 } from "./lib/api";
 
 type View =
@@ -55,6 +57,7 @@ type View =
   | "failures"
   | "database"
   | "table-explorer"
+  | "table-detail"
   | "settings";
 type SearchMode = "lexical" | "semantic" | "hybrid";
 
@@ -92,6 +95,7 @@ function App() {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [selectedDocument, setSelectedDocument] = useState<DocumentRecord | null>(null);
+  const [selectedTableRow, setSelectedTableRow] = useState<{ tableKey: string; rowId: string; field: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -172,7 +176,8 @@ function App() {
         {view === "judgments" && <LibraryView documents={documents.filter((document) => document.document_type.includes("JUDGMENT") || document.document_type === "TRIBUNAL_DECISION")} emptyMessage="No judgment documents have been ingested yet." onSelectDocument={setSelectedDocument} />}
         {view === "failures" && <FailureView batches={batches} />}
         {view === "database" && <DatabaseView setup={setup} documents={documents} />}
-        {view === "table-explorer" && <TableExplorerView />}
+        {view === "table-explorer" && <TableExplorerView onOpenRow={(tableKey, rowId, field) => { setSelectedTableRow({ tableKey, rowId, field }); setView("table-detail"); }} />}
+        {view === "table-detail" && selectedTableRow && <TableRowDetailView selection={selectedTableRow} onBack={() => setView("table-explorer")} />}
         {view === "settings" && <SettingsView setup={setup} />}
       </main>
       {selectedDocument && <DocumentInspector document={selectedDocument} onClose={() => setSelectedDocument(null)} />}
@@ -181,7 +186,7 @@ function App() {
 }
 
 function pageTitle(view: View): string {
-  return navigation.find((item) => item.id === view)?.label ?? "Overview";
+  return navigation.find((item) => item.id === view)?.label ?? (view === "table-detail" ? "Table detail" : "Overview");
 }
 
 function Overview({ setup, counts, batches, documents, onNavigate, onSelectDocument }: { setup: HealthComponent[]; counts: { completed: number; active: number; documents: number }; batches: Batch[]; documents: DocumentRecord[]; onNavigate: (view: View) => void; onSelectDocument: (document: DocumentRecord) => void }) {
@@ -353,8 +358,15 @@ function SearchView() {
 }
 
 function FailureView({ batches }: { batches: Batch[] }) {
+  const [reviews, setReviews] = useState<VerificationReview[]>([]);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  useEffect(() => {
+    void api.getVerificationReviews().then(setReviews).catch((reason) => {
+      setReviewError(reason instanceof Error ? reason.message : "Unable to load verification reviews");
+    });
+  }, []);
   const failures = batches.filter((batch) => batch.state.startsWith("FAILED"));
-  return <div className="panel"><PanelHeader title="Failures requiring attention" />{failures.length === 0 ? <EmptyState text="No failed batches are currently reported by the backend." /> : failures.map((batch) => <div className="failure-row" key={batch.id}><XCircle size={18} /><div><strong>Batch {batch.id.slice(0, 8)}</strong><span>{batch.item_count} files · {batch.failed_count} failed items · {batch.state}</span></div><StatusBadge value={batch.state} /></div>)}</div>;
+  return <div className="failure-stack"><div className="panel"><PanelHeader title="Failures requiring attention" />{failures.length === 0 ? <EmptyState text="No failed batches are currently reported by the backend." /> : failures.map((batch) => <div className="failure-row" key={batch.id}><XCircle size={18} /><div><strong>Batch {batch.id.slice(0, 8)}</strong><span>{batch.item_count} files · {batch.failed_count} failed items · {batch.state}</span></div><StatusBadge value={batch.state} /></div>)}</div><div className="panel"><PanelHeader title="AI verification quarantine" /><p className="panel-intro">Deterministic extraction remains authoritative. AI findings only quarantine a candidate for review; they never overwrite legal text.</p>{reviewError && <div className="error-banner"><XCircle size={17} />{reviewError}</div>}{reviews.length === 0 ? <EmptyState text="No open AI verification findings." /> : reviews.map((review) => <article className="review-card" key={review.item_id}><div className="review-card-top"><StatusBadge value={review.state} /><span>{review.findings.length} finding{review.findings.length === 1 ? "" : "s"}</span></div><code title={review.path}>{review.path}</code>{review.findings.map((finding) => <div className="review-finding" key={finding.id}><div><strong>{finding.field_name}</strong><span>{finding.message}</span></div><StatusBadge value={finding.severity} /></div>)}</article>)}</div></div>;
 }
 
 function DatabaseView({ setup, documents }: { setup: HealthComponent[]; documents: DocumentRecord[] }) {
@@ -381,7 +393,7 @@ function formatCell(value: unknown): string {
   return String(value);
 }
 
-function TableExplorerView() {
+function TableExplorerView({ onOpenRow }: { onOpenRow: (tableKey: string, rowId: string, field: string) => void }) {
   const [tables, setTables] = useState<DatabaseTable[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
   const [table, setTable] = useState<DatabaseTablePage | null>(null);
@@ -411,7 +423,17 @@ function TableExplorerView() {
   const selectTable = (key: string) => { setSelectedKey(key); setOffset(0); };
   const totalPages = table ? Math.max(1, Math.ceil(table.count / pageSize)) : 1;
   const currentPage = table ? Math.floor(table.offset / pageSize) + 1 : 1;
-  return <section className="table-explorer-layout"><div className="panel explorer-heading"><div><span className="hero-kicker">PostgreSQL / read only</span><h2>Table explorer</h2><p>Inspect complete allow-listed table pages in a spreadsheet-style grid. Nothing here can write, delete, or reset data.</p></div><div className="explorer-badge"><Table2 size={22} /><strong>{tables.length}</strong><span>tables available</span></div></div><div className="panel spreadsheet-panel"><div className="panel-header"><div><h3>Data grid</h3><p className="panel-intro">Rows {table ? `${table.offset + 1}–${Math.min(table.offset + table.rows.length, table.count)} of ${table.count}` : "—"}. Use both scrollbars to inspect wide and long records.</p></div><label className="wrap-toggle"><input type="checkbox" checked={wrapCells} onChange={(event) => setWrapCells(event.target.checked)} /> Wrap long cells</label></div><div className="database-tabs explorer-tabs">{tables.map((item) => <button key={item.key} className={selectedKey === item.key ? "active" : ""} onClick={() => selectTable(item.key)}>{item.label}<span>{item.count}</span></button>)}</div>{error && <div className="error-banner"><XCircle size={17} />{error}</div>}{loading && <div className="loading-state"><LoaderCircle className="spin" size={18} /> Loading table page…</div>}{!loading && table && <><div className="spreadsheet-scroll"><table className={wrapCells ? "spreadsheet-table wrap-cells" : "spreadsheet-table"}><thead><tr><th className="row-number-header">#</th>{table.columns.map((column) => <th key={column}>{column.replaceAll("_", " ")}</th>)}</tr></thead><tbody>{table.rows.length === 0 ? <tr><td colSpan={table.columns.length + 1}><EmptyState text="This table is empty." /></td></tr> : table.rows.map((row, index) => <tr key={`${table.key}-${String(row.id ?? index)}`}><td className="row-number">{table.offset + index + 1}</td>{table.columns.map((column) => <td key={column} title={formatCell(row[column])}>{formatCell(row[column])}</td>)}</tr>)}</tbody></table></div><div className="spreadsheet-footer"><span>Page {currentPage} of {totalPages}</span><div><button className="small-button" onClick={() => setOffset(Math.max(0, offset - pageSize))} disabled={offset === 0}>Previous</button><button className="small-button" onClick={() => setOffset(offset + pageSize)} disabled={!table || offset + table.rows.length >= table.count}>Next</button></div></div></>}</div></section>;
+  return <section className="table-explorer-layout"><div className="panel explorer-heading"><div><span className="hero-kicker">PostgreSQL / read only</span><h2>Table explorer</h2><p>Inspect complete allow-listed table pages in a spreadsheet-style grid. Nothing here can write, delete, or reset data.</p></div><div className="explorer-badge"><Table2 size={22} /><strong>{tables.length}</strong><span>tables available</span></div></div><div className="panel spreadsheet-panel"><div className="panel-header"><div><h3>Data grid</h3><p className="panel-intro">Rows {table ? `${table.offset + 1}–${Math.min(table.offset + table.rows.length, table.count)} of ${table.count}` : "—"}. Use both scrollbars to inspect wide and long records.</p></div><label className="wrap-toggle"><input type="checkbox" checked={wrapCells} onChange={(event) => setWrapCells(event.target.checked)} /> Wrap long cells</label></div><div className="database-tabs explorer-tabs">{tables.map((item) => <button key={item.key} className={selectedKey === item.key ? "active" : ""} onClick={() => selectTable(item.key)}>{item.label}<span>{item.count}</span></button>)}</div>{error && <div className="error-banner"><XCircle size={17} />{error}</div>}{loading && <div className="loading-state"><LoaderCircle className="spin" size={18} /> Loading table page…</div>}{!loading && table && <><div className="spreadsheet-scroll"><table className={wrapCells ? "spreadsheet-table wrap-cells" : "spreadsheet-table"}><thead><tr><th className="row-number-header">#</th>{table.columns.map((column) => <th key={column}>{column.replaceAll("_", " ")}</th>)}</tr></thead><tbody>{table.rows.length === 0 ? <tr><td colSpan={table.columns.length + 1}><EmptyState text="This table is empty." /></td></tr> : table.rows.map((row, index) => <tr key={`${table.key}-${String(row.id ?? index)}`}><td className="row-number">{table.offset + index + 1}</td>{table.columns.map((column) => <td key={column} title={formatCell(row[column])}>{row.id ? <button className="cell-button" onClick={() => onOpenRow(table.key, String(row.id), column)}>{formatCell(row[column])}</button> : formatCell(row[column])}</td>)}</tr>)}</tbody></table></div><div className="spreadsheet-footer"><span>Page {currentPage} of {totalPages}</span><div><button className="small-button" onClick={() => setOffset(Math.max(0, offset - pageSize))} disabled={offset === 0}>Previous</button><button className="small-button" onClick={() => setOffset(offset + pageSize)} disabled={!table || offset + table.rows.length >= table.count}>Next</button></div></div></>}</div></section>;
+}
+
+function TableRowDetailView({ selection, onBack }: { selection: { tableKey: string; rowId: string; field: string }; onBack: () => void }) {
+  const [record, setRecord] = useState<DatabaseRecord | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    void api.getDatabaseRecord(selection.tableKey, selection.rowId).then(setRecord)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : "Record unavailable"));
+  }, [selection.rowId, selection.tableKey]);
+  return <section className="table-detail-layout"><button className="secondary-button" onClick={onBack}><ArrowUpRight size={15} /> Back to table</button>{error && <div className="error-banner"><XCircle size={17} />{error}</div>}{!record && !error && <div className="loading-state"><LoaderCircle className="spin" size={18} /> Loading row detail…</div>}{record && <><div className="panel detail-heading"><div><span className="hero-kicker">{record.label} / selected cell</span><h2>{selection.field.replaceAll("_", " ")}</h2><p>Read-only row detail with source provenance.</p></div><code>{record.row_id}</code></div><div className="content-grid"><div className="panel"><PanelHeader title="Row values" /><div className="detail-field-list">{record.columns.map((column) => <div className={column === selection.field ? "detail-field active" : "detail-field"} key={column}><span>{column.replaceAll("_", " ")}</span><strong>{formatCell(record.row[column])}</strong></div>)}</div></div><div className="panel"><PanelHeader title="Provenance" /><div className="detail-field-list">{Object.entries(record.provenance).map(([key, value]) => <div className="detail-field" key={key}><span>{key.replaceAll("_", " ")}</span><strong>{formatCell(value)}</strong></div>)}</div></div></div></>}</section>;
 }
 
 function SettingsView({ setup }: { setup: HealthComponent[] }) {

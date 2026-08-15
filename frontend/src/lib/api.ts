@@ -157,6 +157,38 @@ export interface DatabaseTablePage extends DatabaseTable {
   limit: number;
 }
 
+export interface DatabaseRecord {
+  key: string;
+  label: string;
+  row_id: string;
+  columns: string[];
+  row: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+}
+
+export interface VerificationFinding {
+  id: string;
+  run_id: string;
+  severity: string;
+  field_name: string;
+  message: string;
+  expected_value: string | null;
+  observed_value: string | null;
+  page_start: number | null;
+  page_end: number | null;
+  confidence: number | null;
+  evidence: Record<string, unknown>;
+  decision: string;
+}
+
+export interface VerificationReview {
+  item_id: string;
+  batch_id: string;
+  path: string;
+  state: string;
+  findings: VerificationFinding[];
+}
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8765/api/v1";
 let sessionToken: string | null = null;
 let sessionTokenPromise: Promise<void> | null = null;
@@ -214,6 +246,9 @@ export const api = {
   getDatabaseOverview: () => request<DatabaseOverview>("/database/overview", undefined, 30000),
   getDatabaseTable: (key: string, offset = 0, limit = 200) =>
     request<DatabaseTablePage>(`/database/tables/${encodeURIComponent(key)}?offset=${offset}&limit=${limit}`, undefined, 30000),
+  getDatabaseRecord: (key: string, id: string) =>
+    request<DatabaseRecord>(`/database/tables/${encodeURIComponent(key)}/${encodeURIComponent(id)}`, undefined, 30000),
+  getVerificationReviews: () => request<VerificationReview[]>('/verification/reviews', undefined, 30000),
   createBatch: (paths: string[], recursive: boolean) =>
     request<Batch>("/batches", {
       method: "POST",

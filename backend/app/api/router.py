@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.core.config import get_settings
+from app.db.base import Base
 from app.db.models import (
     Act,
     Chunk,
@@ -23,14 +26,18 @@ from app.db.models import (
     Judgment,
     Page,
     Reference,
+    VerificationFinding,
+    VerificationRun,
 )
 from app.db.session import check_database_schema, get_session
 from app.schemas.api import (
     ActStructureResponse,
+    AiCapabilitiesResponse,
     BatchCreateRequest,
     BatchItemResponse,
     BatchResponse,
     DatabaseOverviewResponse,
+    DatabaseRecordResponse,
     DatabaseTablePageResponse,
     DatabaseTableResponse,
     DocumentResponse,
@@ -46,6 +53,8 @@ from app.schemas.api import (
     SearchRequest,
     SearchResponse,
     SetupResponse,
+    VerificationFindingResponse,
+    VerificationReviewResponse,
 )
 from app.services.discovery import discover_paths
 from app.services.embedding_jobs import embed_missing_chunks
@@ -57,6 +66,24 @@ from app.workers.ingestion import run_batch
 api_router = APIRouter()
 settings = get_settings()
 _background_tasks: dict[UUID, asyncio.Task[None]] = {}
+
+DOMAIN_TABLE_LABELS = {
+    "sources": "Sources",
+    "acts": "Acts",
+    "legal_parts": "Legal parts",
+    "legal_chapters": "Legal chapters",
+    "legal_sections": "Legal sections",
+    "legal_nodes": "Legal nodes",
+    "judgments": "Judgments",
+    "judges": "Judges",
+    "judgment_judges": "Judgment judges",
+    "parties": "Parties",
+    "judgment_paragraphs": "Judgment paragraphs",
+    "stage_events": "Stage events",
+    "ingestion_errors": "Ingestion errors",
+    "duplicates": "Duplicates",
+    "document_versions": "Document versions",
+}
 
 
 def _launch_batch(batch_id: UUID) -> None:
@@ -337,6 +364,17 @@ async def database_overview(
             ],
         ),
     ]
+    for key, label in DOMAIN_TABLE_LABELS.items():
+        table = Base.metadata.tables[key]
+        tables.append(
+            DatabaseTableResponse(
+                key=key,
+                label=label,
+                count=await _table_count(session, table),
+                columns=[column.name for column in table.columns if column.name != "vector"],
+                rows=[],
+            )
+        )
     return DatabaseOverviewResponse(tables=tables)
 
 
@@ -360,6 +398,7 @@ async def database_table(
         "ingestion_batches": "Ingestion batches",
         "ingestion_items": "Ingestion items",
         "embeddings": "Embeddings metadata",
+        **DOMAIN_TABLE_LABELS,
     }
     models = {
         "documents": Document,
@@ -374,7 +413,25 @@ async def database_table(
         raise HTTPException(
             status_code=404, detail="table is not available in the read-only viewer"
         )
-    model = models[table_key]
+    model = models.get(table_key)
+    if model is None:
+        table = Base.metadata.tables[table_key]
+        count = await _table_count(session, table)
+        columns = [column.name for column in table.columns if column.name != "vector"]
+        selected_columns = [table.c[column] for column in columns]
+        result = await session.execute(
+            select(*selected_columns).offset(offset).limit(limit)
+        )
+        values = [_database_row(**dict(row)) for row in result.mappings().all()]
+        return DatabaseTablePageResponse(
+            key=table_key,
+            label=labels[table_key],
+            count=count,
+            offset=offset,
+            limit=limit,
+            columns=columns,
+            rows=values,
+        )
     count = await _table_count(session, model)
 
     if table_key == "documents":
@@ -535,6 +592,152 @@ async def database_table(
         limit=limit,
         columns=columns,
         rows=values,
+    )
+
+
+@api_router.get(
+    "/database/tables/{table_key}/{row_id}",
+    response_model=DatabaseRecordResponse,
+    tags=["database"],
+)
+async def database_record(
+    table_key: str,
+    row_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> DatabaseRecordResponse:
+    model_map = {
+        "documents": Document,
+        "pages": Page,
+        "chunks": Chunk,
+        "references": Reference,
+        "ingestion_batches": IngestionBatch,
+        "ingestion_items": IngestionItem,
+        "embeddings": Embedding,
+    }
+    labels = {
+        "documents": "Documents",
+        "pages": "Pages",
+        "chunks": "Chunks",
+        "references": "References",
+        "ingestion_batches": "Ingestion batches",
+        "ingestion_items": "Ingestion items",
+        "embeddings": "Embeddings metadata",
+    }
+    model = model_map.get(table_key)
+    if model is None:
+        table = Base.metadata.tables.get(table_key)
+        if table is None or "id" not in table.c:
+            raise HTTPException(
+                status_code=404,
+                detail="row detail is not available for this table",
+            )
+        result = await session.execute(
+            select(table).where(table.c.id == row_id)
+        )
+        mapping = result.mappings().first()
+        if mapping is None:
+            raise HTTPException(status_code=404, detail="row not found")
+        columns = [column.name for column in table.columns if column.name != "vector"]
+        row_values = _database_row(
+            **{column: mapping[column] for column in columns}
+        )
+        generic_provenance = {
+            "table": table_key,
+            "row_id": str(row_id),
+            **{
+                key: row_values[key]
+                for key in ("document_id", "page_start", "page_end", "item_id", "act_id")
+                if key in row_values
+            },
+        }
+        return DatabaseRecordResponse(
+            key=table_key,
+            label=DOMAIN_TABLE_LABELS[table_key],
+            row_id=row_id,
+            columns=columns,
+            row=row_values,
+            provenance=generic_provenance,
+        )
+    row = await session.get(model, row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="row not found")
+    table_page = await database_table(table_key, 1, 0, session)
+    row_values = {
+        column: _database_value(getattr(row, column, None)) for column in table_page.columns
+    }
+    provenance: dict[str, object] = {"table": table_key, "row_id": str(row_id)}
+    if table_key == "documents":
+        source = await session.scalar(
+            select(Document).options(joinedload(Document.source)).where(Document.id == row_id)
+        )
+        provenance.update(
+            {
+                "document_id": str(row_id),
+                "filename": source.filename,
+                "source_path": source.source.path,
+            }
+        )
+    elif table_key == "pages":
+        page = await session.scalar(
+            select(Page)
+            .options(joinedload(Page.document).joinedload(Document.source))
+            .where(Page.id == row_id)
+        )
+        provenance.update(
+            {
+                "document_id": str(page.document_id),
+                "page_number": page.page_number,
+                "filename": page.document.filename,
+                "source_path": page.document.source.path,
+            }
+        )
+    elif table_key == "chunks":
+        chunk = await session.scalar(select(Chunk).where(Chunk.id == row_id))
+        document = await session.scalar(
+            select(Document)
+            .options(joinedload(Document.source))
+            .where(Document.id == chunk.document_id)
+        )
+        provenance.update(
+            {
+                "document_id": str(chunk.document_id),
+                "page_start": chunk.page_start,
+                "page_end": chunk.page_end,
+                "filename": document.filename,
+                "source_path": document.source.path,
+            }
+        )
+    elif table_key == "references":
+        reference = await session.scalar(select(Reference).where(Reference.id == row_id))
+        provenance.update(
+            {
+                "document_id": str(reference.document_id),
+                "page_start": reference.page_start,
+                "page_end": reference.page_end,
+            }
+        )
+    elif table_key == "ingestion_items":
+        provenance.update(
+            {
+                "batch_id": str(row.batch_id),
+                "document_id": str(row.document_id) if row.document_id else None,
+            }
+        )
+    elif table_key == "embeddings":
+        chunk = await session.scalar(select(Chunk).where(Chunk.id == row.chunk_id))
+        provenance.update(
+            {
+                "chunk_id": str(row.chunk_id),
+                "document_id": str(chunk.document_id) if chunk else None,
+            }
+        )
+    return DatabaseRecordResponse(
+        key=table_key,
+        label=labels[table_key],
+        row_id=row_id,
+        columns=table_page.columns,
+        row=row_values,
+        provenance=provenance,
     )
 
 
@@ -941,6 +1144,281 @@ async def get_document_structure(
             for reference in references
         ],
     )
+
+
+def _require_ai_read_access(request: Request) -> None:
+    configured = settings.ai_read_token
+    if configured and request.headers.get("authorization") != f"Bearer {configured}":
+        raise HTTPException(status_code=401, detail="AI read access token required")
+
+
+@api_router.get(
+    "/ai/capabilities",
+    response_model=AiCapabilitiesResponse,
+    tags=["ai-access"],
+)
+async def ai_capabilities(request: Request) -> AiCapabilitiesResponse:
+    _require_ai_read_access(request)
+    transfer_mode = (
+        "local"
+        if "localhost" in settings.ai_nim_base_url or "127.0.0.1" in settings.ai_nim_base_url
+        else "hosted"
+    )
+    return AiCapabilitiesResponse(
+        schema_version="0005_ai_verification",
+        access_mode="read-only-openapi+mcp",
+        read_only=True,
+        tools=[
+            "search_legal_documents",
+            "get_document_context",
+            "get_document_provenance",
+            "list_table_rows",
+            "get_table_row",
+        ],
+        verification_provider=settings.ai_verification_provider,
+        verification_enabled=settings.ai_verification_enabled,
+        transfer_mode=transfer_mode,
+    )
+
+
+@api_router.get("/ai/tables/{table_key}", tags=["ai-access"])
+async def ai_table_rows(
+    table_key: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> DatabaseTablePageResponse:
+    _require_ai_read_access(request)
+    return await database_table(table_key, limit, offset, session)
+
+
+@api_router.get("/ai/documents/{document_id}/context", tags=["ai-access"])
+async def ai_document_context(
+    document_id: UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> dict[str, object]:
+    _require_ai_read_access(request)
+    return {
+        "document": (await get_document(document_id, session)).model_dump(mode="json"),
+        "pages": [
+            page.model_dump(mode="json")
+            for page in await list_document_pages(document_id, session)
+        ],
+        "structure": (await get_document_structure(document_id, session)).model_dump(mode="json"),
+    }
+
+
+@api_router.get("/ai/tables/{table_key}/{row_id}", tags=["ai-access"])
+async def ai_table_row(
+    table_key: str,
+    row_id: UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> DatabaseRecordResponse:
+    _require_ai_read_access(request)
+    return await database_record(table_key, row_id, session)
+
+
+@api_router.post("/ai/search", response_model=SearchResponse, tags=["ai-access"])
+async def ai_search(
+    payload: SearchRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> SearchResponse:
+    _require_ai_read_access(request)
+    return await search(payload, session)
+
+
+MCP_TOOL_DEFINITIONS: list[dict[str, object]] = [
+    {
+        "name": "search_legal_documents",
+        "description": "Search indexed legal text and return provenance-backed hits.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "mode": {"type": "string", "enum": ["lexical", "semantic", "hybrid"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_document_context",
+        "description": "Read a document, its pages, parsed structure, and references.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"document_id": {"type": "string", "format": "uuid"}},
+            "required": ["document_id"],
+        },
+    },
+    {
+        "name": "list_table_rows",
+        "description": "Read a bounded page from an allow-listed database table.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "table_key": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                "offset": {"type": "integer", "minimum": 0},
+            },
+            "required": ["table_key"],
+        },
+    },
+    {
+        "name": "get_table_row",
+        "description": "Read one database row with its source/provenance metadata.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "table_key": {"type": "string"},
+                "row_id": {"type": "string", "format": "uuid"},
+            },
+            "required": ["table_key", "row_id"],
+        },
+    },
+]
+
+
+def _mcp_result(request_id: object, value: object, *, is_error: bool = False) -> dict[str, object]:
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {
+            "content": [{"type": "text", "text": text}],
+            "structuredContent": value,
+            "isError": is_error,
+        },
+    }
+
+
+@api_router.post("/mcp", tags=["ai-access"])
+async def mcp_endpoint(
+    payload: dict[str, Any],
+    request: Request,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> dict[str, object]:
+    """Small read-only MCP JSON-RPC adapter for local AI clients."""
+    _require_ai_read_access(request)
+    request_id = payload.get("id")
+    method = payload.get("method")
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "judicore", "version": "0.1.0"},
+            },
+        }
+    if method in {"notifications/initialized", "ping"}:
+        return {"jsonrpc": "2.0", "id": request_id, "result": {}}
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": MCP_TOOL_DEFINITIONS}}
+    if method != "tools/call":
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"unsupported MCP method: {method}"},
+        }
+    params = payload.get("params") or {}
+    name = params.get("name")
+    arguments = params.get("arguments") or {}
+    try:
+        if name == "search_legal_documents":
+            value = (
+                await search(SearchRequest.model_validate(arguments), session)
+            ).model_dump(mode="json")
+        elif name == "get_document_context":
+            document_id = UUID(str(arguments["document_id"]))
+            value = {
+                "document": (await get_document(document_id, session)).model_dump(mode="json"),
+                "pages": [
+                    page.model_dump(mode="json")
+                    for page in await list_document_pages(document_id, session)
+                ],
+                "structure": (
+                    await get_document_structure(document_id, session)
+                ).model_dump(mode="json"),
+            }
+        elif name == "list_table_rows":
+            value = (
+                await database_table(
+                    str(arguments["table_key"]),
+                    int(arguments.get("limit", 100)),
+                    int(arguments.get("offset", 0)),
+                    session,
+                )
+            ).model_dump(mode="json")
+        elif name == "get_table_row":
+            value = (
+                await database_record(
+                    str(arguments["table_key"]), UUID(str(arguments["row_id"])), session
+                )
+            ).model_dump(mode="json")
+        else:
+            return _mcp_result(request_id, f"unknown tool: {name}", is_error=True)
+    except (KeyError, TypeError, ValueError, HTTPException) as exc:
+        return _mcp_result(request_id, str(exc), is_error=True)
+    return _mcp_result(request_id, value)
+
+
+@api_router.get(
+    "/verification/reviews",
+    response_model=list[VerificationReviewResponse],
+    tags=["verification"],
+)
+async def verification_reviews(
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[VerificationReviewResponse]:
+    findings = (
+        await session.scalars(
+            select(VerificationFinding)
+            .join(VerificationFinding.run)
+            .options(
+                joinedload(VerificationFinding.run)
+                .joinedload(VerificationRun.item)
+                .joinedload(IngestionItem.batch)
+            )
+            .where(VerificationFinding.decision == "OPEN")
+            .order_by(desc(VerificationFinding.id))
+            .limit(500)
+        )
+    ).all()
+    grouped: dict[UUID, VerificationReviewResponse] = {}
+    for finding in findings:
+        item = finding.run.item
+        review = grouped.setdefault(
+            item.id,
+            VerificationReviewResponse(
+                item_id=item.id,
+                batch_id=item.batch.id,
+                path=item.path,
+                state=item.state.value,
+                findings=[],
+            ),
+        )
+        review.findings.append(
+            VerificationFindingResponse(
+                id=finding.id,
+                run_id=finding.run_id,
+                severity=finding.severity,
+                field_name=finding.field_name,
+                message=finding.message,
+                expected_value=finding.expected_value,
+                observed_value=finding.observed_value,
+                page_start=finding.page_start,
+                page_end=finding.page_end,
+                confidence=finding.confidence,
+                evidence=finding.evidence,
+                decision=finding.decision,
+            )
+        )
+    return list(grouped.values())
 
 
 @api_router.post("/search", response_model=SearchResponse, tags=["search"])

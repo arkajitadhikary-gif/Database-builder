@@ -64,6 +64,7 @@ class IngestionState(StrEnum):
     SKIPPED_DUPLICATE = "SKIPPED_DUPLICATE"
     SKIPPED_UNSUPPORTED = "SKIPPED_UNSUPPORTED"
     CANCELLED = "CANCELLED"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
 
 class DuplicateKind(StrEnum):
@@ -459,6 +460,9 @@ class IngestionItem(Base, TimestampMixin):
     errors: Mapped[list[IngestionError]] = relationship(
         back_populates="item", cascade="all, delete-orphan"
     )
+    verification_runs: Mapped[list[VerificationRun]] = relationship(
+        back_populates="item", cascade="all, delete-orphan"
+    )
 
 
 class StageEvent(Base):
@@ -490,6 +494,44 @@ class IngestionError(Base):
     retryable: Mapped[bool] = mapped_column(Boolean, nullable=False)
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     item: Mapped[IngestionItem] = relationship(back_populates="errors")
+
+
+class VerificationRun(Base, TimestampMixin):
+    __tablename__ = "verification_runs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ingestion_items.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    transfer_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    input_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    item: Mapped[IngestionItem] = relationship(back_populates="verification_runs")
+    findings: Mapped[list[VerificationFinding]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class VerificationFinding(Base):
+    __tablename__ = "verification_findings"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("verification_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    field_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_value: Mapped[str | None] = mapped_column(Text)
+    observed_value: Mapped[str | None] = mapped_column(Text)
+    page_start: Mapped[int | None] = mapped_column(Integer)
+    page_end: Mapped[int | None] = mapped_column(Integer)
+    confidence: Mapped[float | None] = mapped_column()
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), default="OPEN", nullable=False)
+    run: Mapped[VerificationRun] = relationship(back_populates="findings")
 
 
 class DuplicateRecord(Base, TimestampMixin):

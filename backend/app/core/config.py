@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384
     embedding_device: str = "cpu"
+    ai_verification_enabled: bool = False
+    ai_verification_provider: str = "nvidia_nim"
+    ai_verification_model: str = "nvidia/nemotron-mini-4b-instruct"
+    ai_nim_base_url: str = "http://127.0.0.1:8000/v1"
+    ai_nim_api_key: str | None = None
+    ai_nim_hosted_allowed: bool = False
+    ai_read_token: str | None = None
     ocr_enabled: bool = True
     ocr_timeout_seconds: int = 180
     log_level: str = "INFO"

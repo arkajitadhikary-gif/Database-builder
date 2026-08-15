@@ -67,6 +67,14 @@ A batch follows the durable path `Discovery → Validation → SHA-256 → Dupli
 
 The retrieval API supports PostgreSQL FTS, pgvector cosine similarity, metadata filtering, and reciprocal-rank fusion for hybrid retrieval. Every result includes source path, page range, document type, and section or paragraph metadata. Semantic and hybrid search report `NO_INDEXED_VECTORS` when embeddings are not persisted instead of implying semantic coverage. `POST /api/v1/embeddings/backfill` performs a bounded, row-locked retry for missing vectors. `GET /api/v1/documents/{id}/pages` and `GET /api/v1/documents/{id}/structure` expose persisted raw/normalized pages, Act sections, judgment paragraphs, and references for inspection.
 
+## Read-only database and AI access
+
+The **Table explorer** is a spreadsheet-style, read-only view over all domain and operational tables. It supports vertical and horizontal scrolling, optional long-cell wrapping, paged results, and a row/cell detail screen with provenance. Embedding vectors are intentionally excluded from the visual grid; metadata remains visible. Tables with a composite key (for example `judgment_judges`) are readable but do not expose a single-row detail link.
+
+AI clients can use the read-only OpenAPI contract at `/docs` and the bounded endpoints `/api/v1/ai/capabilities`, `/api/v1/ai/search`, `/api/v1/ai/tables/{table_key}`, `/api/v1/ai/tables/{table_key}/{row_id}`, and `/api/v1/ai/documents/{document_id}/context`. A small read-only MCP JSON-RPC adapter is available at `POST /api/v1/mcp` with `initialize`, `tools/list`, and `tools/call` for search, document context, table rows, and row provenance. Set `AI_READ_TOKEN` before exposing these endpoints beyond the local machine.
+
+AI verification is provider-neutral and opt-in (`AI_VERIFICATION_ENABLED=false` by default). The default adapter targets a local OpenAI-compatible NVIDIA NIM endpoint. Hosted transfer is rejected unless `AI_NIM_HOSTED_ALLOWED=true`; the deterministic parser and source PDF remain authoritative. A mismatch creates a persisted verification run/finding and quarantines the item as `REVIEW_REQUIRED`; AI never overwrites canonical legal text. Review findings appear under **Failures**.
+
 ## Production hardening boundaries
 
 The initial Alembic migration is a frozen schema snapshot and no longer depends on the current ORM metadata at runtime. `0003_schema_hardening` checks the expected migration revision, pgvector availability, vector dimension, and document integrity constraints. Migrations never drop production data unless `JUDICORE_ALLOW_DESTRUCTIVE_MIGRATIONS=YES` is explicitly set. Backup and restore scripts require a deliberate confirmation switch for destructive restore.

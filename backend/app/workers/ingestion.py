@@ -32,6 +32,8 @@ from app.db.models import (
     Reference,
     Source,
     StageEvent,
+    VerificationFinding,
+    VerificationRun,
 )
 from app.db.session import SessionFactory
 from app.services.chunking import build_chunks
@@ -40,6 +42,7 @@ from app.services.embeddings import get_embedding_provider
 from app.services.parsers import parse_judgment, parse_legislation
 from app.services.pdf import extract_pdf, extract_with_ocr
 from app.services.text import classify_document
+from app.services.verification import get_verification_provider
 
 logger = logging.getLogger("judicore.ingestion")
 
@@ -50,6 +53,7 @@ TERMINAL_STATES = {
     IngestionState.SKIPPED_DUPLICATE,
     IngestionState.SKIPPED_UNSUPPORTED,
     IngestionState.CANCELLED,
+    IngestionState.REVIEW_REQUIRED,
 }
 
 
@@ -181,6 +185,86 @@ async def _persist_parsed_structure(
                 page_end=reference.page_end,
             )
         )
+
+
+async def _verify_candidate(
+    session, item: IngestionItem, extracted, classification, parsed
+) -> bool:
+    settings = get_settings()
+    if not settings.ai_verification_enabled:
+        return True
+    candidate = {
+        "filename": Path(item.path).name,
+        "document_type": classification.document_type.value,
+        "title": parsed.title,
+        "year": parsed.year,
+        "pages": [
+            {
+                "page_number": page.page_number,
+                "text": page.normalized_text,
+            }
+            for page in extracted.pages
+        ],
+        "sections": [
+            {
+                "label": section.label,
+                "heading": section.heading,
+                "page_start": section.page_start,
+                "page_end": section.page_end,
+                "text": section.text,
+            }
+            for section in parsed.sections
+        ],
+        "paragraphs": [
+            {
+                "official_number": paragraph.official_number,
+                "page_start": paragraph.page_start,
+                "page_end": paragraph.page_end,
+                "text": paragraph.text,
+            }
+            for paragraph in parsed.paragraphs
+        ],
+    }
+    result = await get_verification_provider().verify(candidate)
+    run = VerificationRun(
+        item_id=item.id,
+        provider=result.provider,
+        model=result.model,
+        transfer_mode=result.transfer_mode,
+        status=result.status,
+        input_sha256=result.input_sha256,
+        output_json=result.output,
+        error_message=result.error_message,
+    )
+    session.add(run)
+    await session.flush()
+    for finding in result.findings:
+        session.add(
+            VerificationFinding(
+                run_id=run.id,
+                severity=finding.severity,
+                field_name=finding.field_name,
+                message=finding.message,
+                expected_value=finding.expected_value,
+                observed_value=finding.observed_value,
+                page_start=finding.page_start,
+                page_end=finding.page_end,
+                confidence=finding.confidence,
+                evidence=finding.evidence or {},
+            )
+        )
+    await session.flush()
+    if result.status != "PASSED":
+        item.state = IngestionState.REVIEW_REQUIRED
+        item.last_error = result.error_message or "AI verification requires review"
+        await _transition(
+            session,
+            item,
+            IngestionState.REVIEW_REQUIRED,
+            {"verification_run_id": str(run.id), "findings": len(result.findings)},
+        )
+        return False
+    return True
 
 
 async def _persist_embeddings(session, chunks: list[Chunk]) -> str:
@@ -341,6 +425,10 @@ async def _process_item(session, item: IngestionItem) -> None:
         parsed = parse_judgment(extracted.pages)
     else:
         parsed = parse_legislation(extracted.pages)
+    if not await _verify_candidate(session, item, extracted, classification, parsed):
+        item.document_id = None
+        await session.delete(document)
+        return
     document.title = parsed.title
     if parsed.year and not document.document_date:
         document.document_date = datetime(parsed.year, 1, 1).date()
@@ -466,8 +554,16 @@ async def run_batch(batch_id: UUID) -> None:
                         .where(IngestionItem.state == IngestionState.FAILED_TERMINAL)
                         .limit(1)
                     )
+                    review_required = await session.scalar(
+                        select(IngestionItem.id)
+                        .where(IngestionItem.batch_id == batch_id)
+                        .where(IngestionItem.state == IngestionState.REVIEW_REQUIRED)
+                        .limit(1)
+                    )
                     batch.state = (
-                        IngestionState.FAILED_RETRYABLE
+                        IngestionState.REVIEW_REQUIRED
+                        if review_required is not None
+                        else IngestionState.FAILED_RETRYABLE
                         if failed_retryable is not None
                         else IngestionState.FAILED_TERMINAL
                         if failed_terminal is not None

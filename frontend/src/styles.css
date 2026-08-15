@@ -197,10 +197,24 @@ td code { display: block; margin-top: 4px; }
 .spreadsheet-table .row-number-header, .spreadsheet-table .row-number { position: sticky; left: 0; z-index: 3; min-width: 48px; width: 48px; text-align: right; color: #8a96a8; background: var(--soft); }
 .spreadsheet-table .row-number-header { z-index: 4; }
 .spreadsheet-table.wrap-cells td { max-width: 520px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cell-button { display: block; width: 100%; border: 0; padding: 0; background: transparent; color: inherit; text-align: left; font: inherit; white-space: inherit; overflow: inherit; text-overflow: inherit; }
+.cell-button:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .spreadsheet-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; color: var(--muted); font-size: .72rem; }
 .spreadsheet-footer > div { display: flex; gap: 7px; }
 .dark .database-tabs button:hover, .dark .database-tabs button.active { background: #212b4b; }
 .dark .spreadsheet-table th, .dark .spreadsheet-table .row-number { background: #1b2534; }
+.table-detail-layout { padding-top: 28px; }
+.detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-top: 14px; }
+.detail-heading h2 { font-size: 1.65rem; text-transform: capitalize; }
+.detail-heading p { color: var(--muted); font-size: .78rem; margin-top: 9px; }
+.detail-heading code { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-field-list { display: grid; gap: 0; }
+.detail-field { display: grid; grid-template-columns: minmax(145px, .4fr) minmax(0, 1fr); gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.detail-field:last-child { border-bottom: 0; }
+.detail-field span { color: var(--muted); font-size: .72rem; text-transform: capitalize; }
+.detail-field strong { color: var(--ink); font-family: "IBM Plex Mono", monospace; font-size: .69rem; font-weight: 500; white-space: pre-wrap; overflow-wrap: anywhere; }
+.detail-field.active { background: var(--soft); border-radius: 6px; padding-left: 9px; padding-right: 9px; }
+.detail-field.active span { color: var(--accent); font-weight: 700; }
 .settings-grid { padding-top: 28px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .65fr); gap: 18px; }
 @media (max-width: 1280px) { .main-content { padding-left: 30px; padding-right: 30px; } .hero-illustration { width: 190px; } }
 
@@ -209,6 +223,16 @@ td code { display: block; margin-top: 4px; }
 .link-button { border: 0; background: transparent; padding: 0; color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .missing-label { display: block; color: #b05258; font-size: .65rem; margin-top: 4px; }
 .job-inspector { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 18px; }
+.failure-stack { display: grid; gap: 18px; }
+.review-card { border: 1px solid #ecd6b1; border-radius: 8px; padding: 13px; margin-top: 10px; background: #fffaf0; }
+.review-card-top { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 8px; color: var(--muted); font-size: .7rem; }
+.review-card > code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: .65rem; }
+.review-finding { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; border-top: 1px solid #ecd6b1; margin-top: 9px; padding-top: 9px; }
+.review-finding strong, .review-finding span { display: block; }
+.review-finding strong { font-size: .72rem; }
+.review-finding span { color: var(--muted); font-size: .68rem; margin-top: 3px; }
+.dark .review-card { background: #302918; border-color: #675232; }
+.dark .review-finding { border-color: #675232; }
 .job-item { display: grid; grid-template-columns: 150px minmax(0, 1fr) 220px; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: .72rem; }
 .job-item span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: .66rem; }
 .job-item small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); }

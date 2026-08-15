@@ -33,6 +33,48 @@ class DatabaseTablePageResponse(DatabaseTableResponse):
     limit: int
 
 
+class DatabaseRecordResponse(BaseModel):
+    key: str
+    label: str
+    row_id: UUID
+    columns: list[str]
+    row: dict[str, object]
+    provenance: dict[str, object]
+
+
+class AiCapabilitiesResponse(BaseModel):
+    schema_version: str
+    access_mode: str
+    read_only: bool
+    tools: list[str]
+    verification_provider: str
+    verification_enabled: bool
+    transfer_mode: str
+
+
+class VerificationFindingResponse(BaseModel):
+    id: UUID
+    run_id: UUID
+    severity: str
+    field_name: str
+    message: str
+    expected_value: str | None
+    observed_value: str | None
+    page_start: int | None
+    page_end: int | None
+    confidence: float | None
+    evidence: dict[str, object]
+    decision: str
+
+
+class VerificationReviewResponse(BaseModel):
+    item_id: UUID
+    batch_id: UUID
+    path: str
+    state: str
+    findings: list[VerificationFindingResponse]
+
+
 class BatchCreateRequest(BaseModel):
     paths: list[str] = Field(min_length=1)
     recursive: bool = False
