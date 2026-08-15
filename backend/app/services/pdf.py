@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 from app.core.config import get_settings
 from app.db.models import ExtractionMethod

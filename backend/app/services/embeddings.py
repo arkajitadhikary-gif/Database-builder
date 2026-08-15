@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -89,7 +90,17 @@ def get_embedding_provider() -> EmbeddingProvider:
 def check_embedding_provider() -> tuple[bool, str]:
     try:
         provider = get_embedding_provider()
-        provider._load()
+        model_path = Path(provider.model)
+        if model_path.is_dir():
+            available = (model_path / "modules.json").is_file()
+        else:
+            from huggingface_hub import try_to_load_from_cache
+
+            available = isinstance(
+                try_to_load_from_cache(provider.model, "modules.json"), str
+            )
+        if not available:
+            return False, f"model not available locally: {provider.model}"
         return True, f"{provider.provider}/{provider.model}/{provider.dimension}"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"

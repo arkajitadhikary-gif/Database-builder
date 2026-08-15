@@ -27,7 +27,7 @@ uv run alembic upgrade head
 uv run python run.py --host 127.0.0.1 --port 8765
 ```
 
-The health endpoints are `GET /api/v1/health/live`, `GET /api/v1/health`, and `GET /api/v1/setup`. They report actual dependency state; they do not synthesize readiness. When `SESSION_TOKEN` or `JUDICORE_SESSION_TOKEN` is configured, only the liveness endpoint is public; all other API calls require `Authorization: Bearer <token>`. The packaged Tauri shell generates this token per process and sends it to the sidecar and frontend through a restricted command.
+The health endpoints are `GET /api/v1/health/live`, `GET /api/v1/health`, and `GET /api/v1/setup`. They report actual dependency state; they do not synthesize readiness. Embedding health checks local model availability without downloading or loading model weights, so the first embedding operation may download the configured model when it is not cached. When `SESSION_TOKEN` or `JUDICORE_SESSION_TOKEN` is configured, only the liveness endpoint is public; all other API calls require `Authorization: Bearer <token>`. The packaged Tauri shell generates this token per process and sends it to the sidecar and frontend through a restricted command.
 
 ## Optional local PostgreSQL stack
 

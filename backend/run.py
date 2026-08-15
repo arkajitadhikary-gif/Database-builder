@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import sys
 
 import uvicorn
 
@@ -14,12 +13,6 @@ async def _serve(host: str, port: int) -> None:
     await server.serve()
 
 
-if sys.platform == "win32":
-    try:
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    except AttributeError:
-        pass
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Judicore FastAPI backend")
     parser.add_argument("--host", default=DEFAULT_HOST)
@@ -28,5 +21,5 @@ if __name__ == "__main__":
 
     try:
         asyncio.run(_serve(args.host, args.port), loop_factory=asyncio.SelectorEventLoop)
-    except TypeError:
-        asyncio.run(_serve(args.host, args.port))
+    except KeyboardInterrupt:
+        pass

@@ -4,10 +4,23 @@ from pathlib import Path
 from pydantic import AliasChoices, Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _environment_files() -> tuple[Path, ...]:
+    """Load project configuration regardless of whether startup is from root or backend."""
+    candidates = (
+        PROJECT_ROOT / ".env",
+        PROJECT_ROOT / ".env.local",
+        Path.cwd() / ".env",
+        Path.cwd() / ".env.local",
+    )
+    return tuple(dict.fromkeys(path for path in candidates if path.is_file()))
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(".env", ".env.local"),
+        env_file=_environment_files(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -66,6 +79,10 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     settings = Settings()
+    for field_name in ("reference_root", "archive_root"):
+        path = getattr(settings, field_name)
+        if not path.is_absolute():
+            setattr(settings, field_name, (PROJECT_ROOT / path).resolve())
     settings.reference_root.mkdir(parents=True, exist_ok=True)
     settings.archive_root.mkdir(parents=True, exist_ok=True)
     return settings

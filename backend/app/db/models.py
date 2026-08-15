@@ -251,8 +251,10 @@ class LegalSection(Base, TimestampMixin):
     page_start: Mapped[int] = mapped_column(Integer, nullable=False)
     page_end: Mapped[int] = mapped_column(Integer, nullable=False)
     act: Mapped[Act] = relationship(back_populates="sections")
-    parent: Mapped[LegalSection | None] = relationship(remote_side=[id])
-    children: Mapped[list[LegalSection]] = relationship()
+    parent: Mapped[LegalSection | None] = relationship(
+        remote_side=[id], back_populates="children"
+    )
+    children: Mapped[list[LegalSection]] = relationship(back_populates="parent")
     children_nodes: Mapped[list[LegalNode]] = relationship(
         back_populates="section", cascade="all, delete-orphan"
     )

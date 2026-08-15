@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 
 from sqlalchemy import text
@@ -6,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 EXPECTED_SCHEMA_REVISION = "0004_fix_embedding_dimension"
 engine = create_async_engine(
     str(settings.database_url),
@@ -57,7 +59,13 @@ async def check_database_schema() -> tuple[bool, str]:
                 return False, f"schema revision {migration}; expected {EXPECTED_SCHEMA_REVISION}"
             if vector != 1:
                 return False, f"pgvector extension missing at migration {migration}"
-            print(f"[DEBUG check_database_schema] migration={migration}, vector={vector}, dimension={dimension}, expected={settings.embedding_dimension}")
+            logger.debug(
+                "database schema check: migration=%s vector=%s dimension=%s expected=%s",
+                migration,
+                vector,
+                dimension,
+                settings.embedding_dimension,
+            )
             if dimension != settings.embedding_dimension:
                 return False, (
                     f"pgvector dimension {dimension}; expected {settings.embedding_dimension}; "
