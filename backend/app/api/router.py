@@ -1,0 +1,481 @@
+from __future__ import annotations
+
+import asyncio
+import shutil
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload
+
+from app.core.config import get_settings
+from app.db.models import (
+    Act,
+    Document,
+    IngestionBatch,
+    IngestionItem,
+    IngestionState,
+    Judgment,
+    Page,
+    Reference,
+)
+from app.db.session import check_database_schema, get_session
+from app.schemas.api import (
+    ActStructureResponse,
+    BatchCreateRequest,
+    BatchItemResponse,
+    BatchResponse,
+    DocumentResponse,
+    DocumentStructureResponse,
+    EmbeddingBackfillRequest,
+    EmbeddingBackfillResponse,
+    HealthComponent,
+    JudgmentParagraphResponse,
+    JudgmentStructureResponse,
+    LegalSectionResponse,
+    PageResponse,
+    ReferenceResponse,
+    SearchRequest,
+    SearchResponse,
+    SetupResponse,
+)
+from app.services.discovery import discover_paths
+from app.services.embedding_jobs import embed_missing_chunks
+from app.services.embeddings import check_embedding_provider
+from app.services.pdf import ocr_available, resolve_executable
+from app.services.retrieval import hybrid_search
+from app.workers.ingestion import run_batch
+
+api_router = APIRouter()
+settings = get_settings()
+_background_tasks: dict[UUID, asyncio.Task[None]] = {}
+
+
+def _launch_batch(batch_id: UUID) -> None:
+    existing = _background_tasks.get(batch_id)
+    if existing is not None and not existing.done():
+        return
+    task = asyncio.create_task(run_batch(batch_id))
+    _background_tasks[batch_id] = task
+
+    def _cleanup(completed: asyncio.Task[None]) -> None:
+        if _background_tasks.get(batch_id) is completed:
+            _background_tasks.pop(batch_id, None)
+        if not completed.cancelled() and completed.exception() is not None:
+            completed.exception()
+
+    task.add_done_callback(_cleanup)
+
+
+@api_router.get("/setup", response_model=SetupResponse, tags=["setup"])
+async def setup_status() -> SetupResponse:
+    postgres_ok = False
+    try:
+        from app.db.session import check_database
+
+        postgres_ok, database_detail = await check_database()
+    except Exception as exc:
+        database_detail = type(exc).__name__
+    schema_ok, schema_detail = (
+        await check_database_schema() if postgres_ok else (False, "database unavailable")
+    )
+    tesseract_path = resolve_executable("tesseract")
+    ocrmypdf_path = resolve_executable("ocrmypdf")
+    ocr_ok, ocr_detail = ocr_available()
+    embedding_ok, embedding_detail = await asyncio.to_thread(check_embedding_provider)
+    return SetupResponse(
+        components=[
+            HealthComponent(name="Backend", status="READY", detail="FastAPI is running"),
+            HealthComponent(
+                name="PostgreSQL",
+                status="READY" if postgres_ok else "ERROR",
+                detail=database_detail,
+            ),
+            HealthComponent(
+                name="Alembic + pgvector schema",
+                status="READY" if schema_ok else "NOT CONFIGURED",
+                detail=schema_detail,
+            ),
+            HealthComponent(
+                name="Tesseract",
+                status="READY" if tesseract_path else "NOT CONFIGURED",
+                detail=tesseract_path or "Executable not found on PATH",
+            ),
+            HealthComponent(
+                name="OCRmyPDF",
+                status="READY" if ocrmypdf_path else "NOT CONFIGURED",
+                detail=ocrmypdf_path or "Executable not found on PATH",
+            ),
+            HealthComponent(
+                name="OCR pipeline",
+                status="READY" if ocr_ok else "NOT CONFIGURED",
+                detail=ocr_detail,
+            ),
+            HealthComponent(
+                name="Embedding subsystem",
+                status="READY" if embedding_ok else "NOT CONFIGURED",
+                detail=embedding_detail,
+            ),
+            HealthComponent(
+                name="Reference storage",
+                status="READY" if settings.reference_root.exists() else "ERROR",
+                detail=str(settings.reference_root.resolve()),
+            ),
+        ]
+    )
+
+
+@api_router.post("/batches", response_model=BatchResponse, status_code=202, tags=["ingestion"])
+async def create_batch(
+    payload: BatchCreateRequest,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> BatchResponse:
+    try:
+        paths = discover_paths(
+            payload.paths,
+            recursive=payload.recursive,
+            max_files=settings.max_discovered_files,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    if not paths:
+        raise HTTPException(
+            status_code=400,
+            detail="no files were discovered from the supplied paths",
+        )
+    batch = IngestionBatch(
+        state=IngestionState.DISCOVERED,
+        requested_paths=payload.paths,
+        recursive=payload.recursive,
+    )
+    batch.items = [IngestionItem(path=str(path), state=IngestionState.DISCOVERED) for path in paths]
+    session.add(batch)
+    await session.commit()
+    await session.refresh(batch, attribute_names=["items"])
+    _launch_batch(batch.id)
+    return BatchResponse.from_orm(batch)
+
+
+@api_router.get("/batches", response_model=list[BatchResponse], tags=["ingestion"])
+async def list_batches(
+    limit: int = Query(default=50, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[BatchResponse]:
+    rows = (
+        await session.scalars(
+            select(IngestionBatch)
+            .options(selectinload(IngestionBatch.items))
+            .order_by(desc(IngestionBatch.created_at))
+            .limit(limit)
+        )
+    ).all()
+    return [BatchResponse.from_orm(row) for row in rows]
+
+
+@api_router.get("/batches/{batch_id}", response_model=BatchResponse, tags=["ingestion"])
+async def get_batch(
+    batch_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> BatchResponse:
+    batch = await session.scalar(
+        select(IngestionBatch)
+        .options(selectinload(IngestionBatch.items))
+        .where(IngestionBatch.id == batch_id)
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="batch not found")
+    return BatchResponse.from_orm(batch)
+
+
+@api_router.post("/batches/{batch_id}/pause", response_model=BatchResponse, tags=["ingestion"])
+async def pause_batch(
+    batch_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> BatchResponse:
+    batch = await session.get(IngestionBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="batch not found")
+    batch.pause_requested = True
+    await session.commit()
+    await session.refresh(batch, attribute_names=["items"])
+    return BatchResponse.from_orm(batch)
+
+
+@api_router.post("/batches/{batch_id}/resume", response_model=BatchResponse, tags=["ingestion"])
+async def resume_batch(
+    batch_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> BatchResponse:
+    batch = await session.scalar(
+        select(IngestionBatch)
+        .options(selectinload(IngestionBatch.items))
+        .where(IngestionBatch.id == batch_id)
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="batch not found")
+    batch.pause_requested = False
+    batch.cancel_requested = False
+    await session.commit()
+    _launch_batch(batch.id)
+    await session.refresh(batch, attribute_names=["items"])
+    return BatchResponse.from_orm(batch)
+
+
+@api_router.post("/batches/{batch_id}/cancel", response_model=BatchResponse, tags=["ingestion"])
+async def cancel_batch(
+    batch_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> BatchResponse:
+    batch = await session.scalar(
+        select(IngestionBatch)
+        .options(selectinload(IngestionBatch.items))
+        .where(IngestionBatch.id == batch_id)
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="batch not found")
+    batch.cancel_requested = True
+    await session.commit()
+    return BatchResponse.from_orm(batch)
+
+
+@api_router.post("/batches/{batch_id}/retry", response_model=BatchResponse, tags=["ingestion"])
+async def retry_batch(
+    batch_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> BatchResponse:
+    batch = await session.scalar(
+        select(IngestionBatch)
+        .options(selectinload(IngestionBatch.items))
+        .where(IngestionBatch.id == batch_id)
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="batch not found")
+    batch.cancel_requested = False
+    batch.pause_requested = False
+    batch.state = IngestionState.QUEUED
+    for item in batch.items:
+        if item.state in {
+            IngestionState.FAILED_RETRYABLE,
+            IngestionState.FAILED_TERMINAL,
+        }:
+            item.state = IngestionState.DISCOVERED
+            item.last_error = None
+    await session.commit()
+    _launch_batch(batch.id)
+    await session.refresh(batch, attribute_names=["items"])
+    return BatchResponse.from_orm(batch)
+
+
+@api_router.get(
+    "/batches/{batch_id}/items", response_model=list[BatchItemResponse], tags=["ingestion"]
+)
+async def list_batch_items(
+    batch_id: UUID,
+    limit: int = Query(default=500, ge=1, le=5000),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[BatchItemResponse]:
+    batch_exists = await session.scalar(
+        select(IngestionBatch.id).where(IngestionBatch.id == batch_id)
+    )
+    if batch_exists is None:
+        raise HTTPException(status_code=404, detail="batch not found")
+    items = (
+        await session.scalars(
+            select(IngestionItem)
+            .where(IngestionItem.batch_id == batch_id)
+            .order_by(IngestionItem.created_at)
+            .limit(limit)
+        )
+    ).all()
+    return [BatchItemResponse.from_orm(item) for item in items]
+
+
+@api_router.post(
+    "/embeddings/backfill",
+    response_model=EmbeddingBackfillResponse,
+    status_code=202,
+    tags=["embeddings"],
+)
+async def backfill_embeddings(
+    payload: EmbeddingBackfillRequest,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> EmbeddingBackfillResponse:
+    try:
+        result = await embed_missing_chunks(
+            session,
+            limit=payload.limit,
+            document_id=payload.document_id,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return EmbeddingBackfillResponse(
+        requested=result.requested,
+        embedded=result.embedded,
+        provider=result.provider,
+        model=result.model,
+        dimension=result.dimension,
+    )
+
+
+@api_router.get("/documents", response_model=list[DocumentResponse], tags=["documents"])
+async def list_documents(
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    document_type: str | None = None,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[DocumentResponse]:
+    query = (
+        select(Document)
+        .options(joinedload(Document.source))
+        .order_by(desc(Document.created_at))
+        .offset(offset)
+        .limit(limit)
+    )
+    if document_type:
+        query = query.where(Document.document_type == document_type)
+    rows = (await session.scalars(query)).all()
+    return [DocumentResponse.from_orm(row) for row in rows]
+
+
+@api_router.get("/documents/{document_id}", response_model=DocumentResponse, tags=["documents"])
+async def get_document(
+    document_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> DocumentResponse:
+    document = await session.scalar(
+        select(Document).options(joinedload(Document.source)).where(Document.id == document_id)
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="document not found")
+    return DocumentResponse.from_orm(document)
+
+
+@api_router.get(
+    "/documents/{document_id}/pages", response_model=list[PageResponse], tags=["documents"]
+)
+async def list_document_pages(
+    document_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[PageResponse]:
+    document_exists = await session.scalar(select(Document.id).where(Document.id == document_id))
+    if document_exists is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    pages = (
+        await session.scalars(
+            select(Page).where(Page.document_id == document_id).order_by(Page.page_number)
+        )
+    ).all()
+    return [
+        PageResponse(
+            id=page.id,
+            page_number=page.page_number,
+            raw_text=page.raw_text,
+            normalized_text=page.normalized_text,
+            extraction_method=page.extraction_method.value,
+            text_start_offset=page.text_start_offset,
+            text_end_offset=page.text_end_offset,
+            ocr_engine=page.ocr_engine,
+            ocr_confidence=page.ocr_confidence,
+            warnings=page.warnings,
+        )
+        for page in pages
+    ]
+
+
+@api_router.get(
+    "/documents/{document_id}/structure",
+    response_model=DocumentStructureResponse,
+    tags=["documents"],
+)
+async def get_document_structure(
+    document_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> DocumentStructureResponse:
+    document_exists = await session.scalar(select(Document.id).where(Document.id == document_id))
+    if document_exists is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    act = await session.scalar(
+        select(Act).options(selectinload(Act.sections)).where(Act.document_id == document_id)
+    )
+    judgment = await session.scalar(
+        select(Judgment)
+        .options(selectinload(Judgment.paragraphs))
+        .where(Judgment.document_id == document_id)
+    )
+    references = (
+        await session.scalars(
+            select(Reference)
+            .where(Reference.document_id == document_id)
+            .order_by(Reference.page_start, Reference.created_at)
+        )
+    ).all()
+    return DocumentStructureResponse(
+        document_id=document_id,
+        act=(
+            ActStructureResponse(
+                name=act.name,
+                year=act.year,
+                short_title=act.short_title,
+                sections=[
+                    LegalSectionResponse(
+                        label=section.label,
+                        heading=section.heading,
+                        text=section.text,
+                        page_start=section.page_start,
+                        page_end=section.page_end,
+                    )
+                    for section in act.sections
+                ],
+            )
+            if act
+            else None
+        ),
+        judgment=(
+            JudgmentStructureResponse(
+                case_title=judgment.case_title,
+                court=judgment.court,
+                case_number=judgment.case_number,
+                decision_date=judgment.decision_date,
+                coram_text=judgment.coram_text,
+                paragraphs=[
+                    JudgmentParagraphResponse(
+                        official_number=paragraph.official_number,
+                        internal_sequence=paragraph.internal_sequence,
+                        text=paragraph.text,
+                        page_start=paragraph.page_start,
+                        page_end=paragraph.page_end,
+                    )
+                    for paragraph in sorted(
+                        judgment.paragraphs, key=lambda item: item.internal_sequence
+                    )
+                ],
+            )
+            if judgment
+            else None
+        ),
+        references=[
+            ReferenceResponse(
+                id=reference.id,
+                source_text=reference.source_text,
+                reference_type=reference.reference_type,
+                normalized_key=reference.normalized_key,
+                resolution_status=reference.resolution_status.value,
+                target_document_id=reference.target_document_id,
+                page_start=reference.page_start,
+                page_end=reference.page_end,
+            )
+            for reference in references
+        ],
+    )
+
+
+@api_router.post("/search", response_model=SearchResponse, tags=["search"])
+async def search(
+    payload: SearchRequest,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> SearchResponse:
+    try:
+        return await hybrid_search(session, payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc

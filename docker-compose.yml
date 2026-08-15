@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: judicore-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: judicore
+      POSTGRES_PASSWORD: judicore
+      POSTGRES_DB: judicore
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - judicore-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judicore -d judicore"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  postgres-test:
+    image: pgvector/pgvector:pg16
+    container_name: judicore-postgres-test
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: judicore_test
+      POSTGRES_PASSWORD: judicore_test
+      POSTGRES_DB: judicore_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - judicore-postgres-test-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judicore_test -d judicore_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  judicore-postgres-data:
+  judicore-postgres-test-data:
