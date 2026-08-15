@@ -70,6 +70,17 @@ def test_legislation_parsing_preserves_page_ranges(tmp_path: Path) -> None:
     assert any(chunk.page_end == 2 for chunk in chunks)
 
 
+def test_legislation_parser_deduplicates_repeated_section_labels(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate-sections.pdf"
+    make_pdf(
+        path,
+        ["CONTENTS\n1. Short title\n\n1. Short title\nThis is the operative text."],
+    )
+    parsed = parse_legislation(extract_pdf(path).pages)
+    assert [section.label for section in parsed.sections] == ["1"]
+    assert "operative text" in parsed.sections[0].text
+
+
 def test_judgment_parsing_uses_official_and_internal_numbers(tmp_path: Path) -> None:
     path = tmp_path / "judgment.pdf"
     make_pdf(

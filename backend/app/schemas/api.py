@@ -16,6 +16,18 @@ class SetupResponse(BaseModel):
     components: list[HealthComponent]
 
 
+class DatabaseTableResponse(BaseModel):
+    key: str
+    label: str
+    count: int
+    columns: list[str]
+    rows: list[dict[str, object]]
+
+
+class DatabaseOverviewResponse(BaseModel):
+    tables: list[DatabaseTableResponse]
+
+
 class BatchCreateRequest(BaseModel):
     paths: list[str] = Field(min_length=1)
     recursive: bool = False

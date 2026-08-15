@@ -138,6 +138,15 @@ def parse_legislation(pages: list[ExtractedPage]) -> ParsedLegalDocument:
                 page_end=_page_for_offset(pages, end),
             )
         )
+    # Contents pages and repeated schedules can contain the same section label
+    # more than once. The database intentionally keys sections by act + label,
+    # so keep the richest occurrence instead of crashing the ingestion job.
+    deduplicated_sections: dict[str, ParsedSection] = {}
+    for section in sections:
+        current = deduplicated_sections.get(section.label)
+        if current is None or len(section.text) > len(current.text):
+            deduplicated_sections[section.label] = section
+    sections = list(deduplicated_sections.values())
     references = extract_references(pages)
     title = next((line.strip() for line in full_text.splitlines() if len(line.strip()) >= 5), None)
     year_match = re.search(r"\b(18|19|20)\d{2}\b", full_text[:3000])

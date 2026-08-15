@@ -33,6 +33,7 @@ import {
   api,
   type Batch,
   type BatchItem,
+  type DatabaseTable,
   type DocumentRecord,
   type DocumentStructure,
   type HealthComponent,
@@ -352,7 +353,21 @@ function FailureView({ batches }: { batches: Batch[] }) {
 }
 
 function DatabaseView({ setup, documents }: { setup: HealthComponent[]; documents: DocumentRecord[] }) {
-  return <section className="content-grid"><div className="panel large-panel"><PanelHeader title="Database and subsystem health" />{setup.map((item) => <HealthRow key={item.name} item={item} />)}</div><div className="panel"><PanelHeader title="Canonical counts" /><div className="count-list"><div><span>Documents</span><strong>{documents.length}</strong></div><div><span>Pages</span><strong>{documents.reduce((total, document) => total + document.page_count, 0)}</strong></div><div><span>Database truth</span><StatusBadge value="POSTGRESQL" /></div></div></div></section>;
+  const [tables, setTables] = useState<DatabaseTable[]>([]);
+  const [selectedKey, setSelectedKey] = useState("documents");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const loadTables = useCallback(async () => {
+    setLoading(true);
+    try { const result = await api.getDatabaseOverview(); setTables(result.tables); setError(null); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Database viewer unavailable"); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => {
+    void loadTables();
+  }, [loadTables]);
+  const selected = tables.find((table) => table.key === selectedKey) ?? tables[0];
+  return <section className="database-layout"><div className="content-grid"><div className="panel large-panel"><PanelHeader title="Database and subsystem health" />{setup.map((item) => <HealthRow key={item.name} item={item} />)}</div><div className="panel"><PanelHeader title="Canonical counts" /><div className="count-list"><div><span>Documents</span><strong>{documents.length}</strong></div><div><span>Pages</span><strong>{documents.reduce((total, document) => total + document.page_count, 0)}</strong></div><div><span>Database truth</span><StatusBadge value="POSTGRESQL" /></div></div></div></div><div className="panel database-browser"><div className="panel-header"><div><h3>Read-only data browser</h3><p className="panel-intro">Bounded previews of canonical PostgreSQL tables. No write or destructive actions are exposed.</p></div><button className="icon-button" onClick={() => void loadTables()} aria-label="Refresh database viewer" title="Refresh database viewer"><RefreshCw size={16} /></button></div>{loading && <div className="loading-state"><LoaderCircle className="spin" size={18} /> Loading table snapshot…</div>}{error && <div className="error-banner"><XCircle size={17} />{error}</div>}{!loading && !error && <><div className="database-tabs">{tables.map((table) => <button key={table.key} className={selected?.key === table.key ? "active" : ""} onClick={() => setSelectedKey(table.key)}>{table.label}<span>{table.count}</span></button>)}</div>{selected && <><div className="database-table-meta"><span>{selected.count} total rows · showing latest {selected.rows.length}</span><span>Read only</span></div>{selected.rows.length === 0 ? <EmptyState text="This table is currently empty." /> : <div className="table-wrap database-table"><table><thead><tr>{selected.columns.map((column) => <th key={column}>{column.replaceAll("_", " ")}</th>)}</tr></thead><tbody>{selected.rows.map((row, index) => <tr key={`${selected.key}-${String(row.id ?? index)}`}>{selected.columns.map((column) => <td key={column} title={String(row[column] ?? "—")}>{row[column] == null ? "—" : String(row[column])}</td>)}</tr>)}</tbody></table></div>}</>}</>}</div></section>;
 }
 
 function SettingsView({ setup }: { setup: HealthComponent[] }) {

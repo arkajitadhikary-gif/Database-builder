@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from datetime import date, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.core.config import get_settings
 from app.db.models import (
     Act,
+    Chunk,
     Document,
+    Embedding,
     IngestionBatch,
     IngestionItem,
     IngestionState,
@@ -27,6 +30,8 @@ from app.schemas.api import (
     BatchCreateRequest,
     BatchItemResponse,
     BatchResponse,
+    DatabaseOverviewResponse,
+    DatabaseTableResponse,
     DocumentResponse,
     DocumentStructureResponse,
     EmbeddingBackfillRequest,
@@ -138,6 +143,200 @@ async def _store_uploaded_files(files: list[UploadFile]) -> tuple[Path, list[str
         shutil.rmtree(upload_root, ignore_errors=True)
         raise
     return upload_root, stored_paths, requested_names
+
+
+def _database_value(value: object) -> object:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "value"):
+        return value.value
+    return value
+
+
+def _database_row(**values: object) -> dict[str, object]:
+    return {key: _database_value(value) for key, value in values.items()}
+
+
+async def _table_count(session: AsyncSession, model: type) -> int:
+    return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+@api_router.get(
+    "/database/overview", response_model=DatabaseOverviewResponse, tags=["database"]
+)
+async def database_overview(
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> DatabaseOverviewResponse:
+    """Return a bounded, read-only snapshot for the visual database browser."""
+    documents = (
+        await session.scalars(
+            select(Document)
+            .options(joinedload(Document.source))
+            .order_by(desc(Document.created_at))
+            .limit(50)
+        )
+    ).all()
+    pages = (
+        await session.scalars(
+            select(Page)
+            .options(joinedload(Page.document))
+            .order_by(desc(Page.created_at))
+            .limit(50)
+        )
+    ).all()
+    chunks = (
+        await session.scalars(select(Chunk).order_by(desc(Chunk.created_at)).limit(50))
+    ).all()
+    references = (
+        await session.scalars(select(Reference).order_by(desc(Reference.created_at)).limit(50))
+    ).all()
+    batches = (
+        await session.scalars(
+            select(IngestionBatch)
+            .options(selectinload(IngestionBatch.items))
+            .order_by(desc(IngestionBatch.created_at))
+            .limit(50)
+        )
+    ).all()
+    items = (
+        await session.scalars(
+            select(IngestionItem).order_by(desc(IngestionItem.created_at)).limit(50)
+        )
+    ).all()
+    embeddings = (
+        await session.scalars(select(Embedding).order_by(desc(Embedding.created_at)).limit(50))
+    ).all()
+
+    tables = [
+        DatabaseTableResponse(
+            key="documents",
+            label="Documents",
+            count=await _table_count(session, Document),
+            columns=["id", "filename", "document_type", "page_count", "byte_size", "created_at"],
+            rows=[
+                _database_row(
+                    id=row.id,
+                    filename=row.filename,
+                    document_type=row.document_type,
+                    page_count=row.page_count,
+                    byte_size=row.byte_size,
+                    created_at=row.created_at,
+                )
+                for row in documents
+            ],
+        ),
+        DatabaseTableResponse(
+            key="pages",
+            label="Pages",
+            count=await _table_count(session, Page),
+            columns=["id", "document", "page_number", "extraction_method", "text_preview"],
+            rows=[
+                _database_row(
+                    id=row.id,
+                    document=row.document.filename,
+                    page_number=row.page_number,
+                    extraction_method=row.extraction_method,
+                    text_preview=row.normalized_text[:240],
+                )
+                for row in pages
+            ],
+        ),
+        DatabaseTableResponse(
+            key="chunks",
+            label="Chunks",
+            count=await _table_count(session, Chunk),
+            columns=["id", "document_id", "chunk_index", "page_start", "page_end", "text_preview"],
+            rows=[
+                _database_row(
+                    id=row.id,
+                    document_id=row.document_id,
+                    chunk_index=row.chunk_index,
+                    page_start=row.page_start,
+                    page_end=row.page_end,
+                    text_preview=row.text[:240],
+                )
+                for row in chunks
+            ],
+        ),
+        DatabaseTableResponse(
+            key="references",
+            label="References",
+            count=await _table_count(session, Reference),
+            columns=[
+                "id",
+                "document_id",
+                "reference_type",
+                "resolution_status",
+                "page_start",
+                "page_end",
+            ],
+            rows=[
+                _database_row(
+                    id=row.id,
+                    document_id=row.document_id,
+                    reference_type=row.reference_type,
+                    resolution_status=row.resolution_status,
+                    page_start=row.page_start,
+                    page_end=row.page_end,
+                )
+                for row in references
+            ],
+        ),
+        DatabaseTableResponse(
+            key="ingestion_batches",
+            label="Ingestion batches",
+            count=await _table_count(session, IngestionBatch),
+            columns=["id", "state", "items", "completed", "failed", "created_at"],
+            rows=[
+                _database_row(
+                    id=row.id,
+                    state=row.state,
+                    items=len(row.items),
+                    completed=sum(item.state == IngestionState.COMPLETED for item in row.items),
+                    failed=sum(item.state.value.startswith("FAILED") for item in row.items),
+                    created_at=row.created_at,
+                )
+                for row in batches
+            ],
+        ),
+        DatabaseTableResponse(
+            key="ingestion_items",
+            label="Ingestion items",
+            count=await _table_count(session, IngestionItem),
+            columns=["id", "batch_id", "state", "attempts", "path", "last_error"],
+            rows=[
+                _database_row(
+                    id=row.id,
+                    batch_id=row.batch_id,
+                    state=row.state,
+                    attempts=row.attempts,
+                    path=row.path,
+                    last_error=row.last_error,
+                )
+                for row in items
+            ],
+        ),
+        DatabaseTableResponse(
+            key="embeddings",
+            label="Embeddings",
+            count=await _table_count(session, Embedding),
+            columns=["id", "chunk_id", "provider", "model", "dimension", "created_at"],
+            rows=[
+                _database_row(
+                    id=row.id,
+                    chunk_id=row.chunk_id,
+                    provider=row.provider,
+                    model=row.model,
+                    dimension=row.dimension,
+                    created_at=row.created_at,
+                )
+                for row in embeddings
+            ],
+        ),
+    ]
+    return DatabaseOverviewResponse(tables=tables)
 
 
 @api_router.get("/setup", response_model=SetupResponse, tags=["setup"])

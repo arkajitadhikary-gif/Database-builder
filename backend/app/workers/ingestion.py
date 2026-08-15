@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +40,8 @@ from app.services.embeddings import get_embedding_provider
 from app.services.parsers import parse_judgment, parse_legislation
 from app.services.pdf import extract_pdf, extract_with_ocr
 from app.services.text import classify_document
+
+logger = logging.getLogger("judicore.ingestion")
 
 TERMINAL_STATES = {
     IngestionState.COMPLETED,
@@ -406,89 +409,114 @@ async def _process_item(session, item: IngestionItem) -> None:
 
 
 async def run_batch(batch_id: UUID) -> None:
-    async with SessionFactory() as session:
-        batch = await session.get(IngestionBatch, batch_id)
-        if not batch:
-            return
-        batch.state = IngestionState.QUEUED
-        batch.started_at = datetime.now(UTC)
-        await session.commit()
-        while True:
+    try:
+        async with SessionFactory() as session:
             batch = await session.get(IngestionBatch, batch_id)
             if not batch:
                 return
-            if batch.cancel_requested:
-                batch.state = IngestionState.CANCELLED
-                await session.execute(
-                    IngestionItem.__table__.update()
-                    .where(IngestionItem.batch_id == batch_id)
-                    .where(~IngestionItem.state.in_(list(TERMINAL_STATES)))
-                    .values(state=IngestionState.CANCELLED)
-                )
-                await session.commit()
-                return
-            if batch.pause_requested:
-                batch.state = IngestionState.DISCOVERED
-                await session.commit()
-                return
-            item = await session.scalar(
-                select(IngestionItem)
-                .where(IngestionItem.batch_id == batch_id)
-                .where(~IngestionItem.state.in_(list(TERMINAL_STATES)))
-                .order_by(IngestionItem.created_at)
-                .with_for_update(skip_locked=True)
-                .limit(1)
-            )
-            if item is None:
-                pending_id = await session.scalar(
-                    select(IngestionItem.id)
-                    .where(IngestionItem.batch_id == batch_id)
-                    .where(~IngestionItem.state.in_(list(TERMINAL_STATES)))
-                    .limit(1)
-                )
-                if pending_id is not None:
-                    await session.rollback()
-                    await asyncio.sleep(0.2)
-                    continue
-                failed_retryable = await session.scalar(
-                    select(IngestionItem.id)
-                    .where(IngestionItem.batch_id == batch_id)
-                    .where(IngestionItem.state == IngestionState.FAILED_RETRYABLE)
-                    .limit(1)
-                )
-                failed_terminal = await session.scalar(
-                    select(IngestionItem.id)
-                    .where(IngestionItem.batch_id == batch_id)
-                    .where(IngestionItem.state == IngestionState.FAILED_TERMINAL)
-                    .limit(1)
-                )
-                batch.state = (
-                    IngestionState.FAILED_RETRYABLE
-                    if failed_retryable is not None
-                    else IngestionState.FAILED_TERMINAL
-                    if failed_terminal is not None
-                    else IngestionState.COMPLETED
-                )
-                batch.completed_at = datetime.now(UTC)
-                await session.commit()
-                return
-            item.locked_at = datetime.now(UTC)
-            try:
-                await _process_item(session, item)
-            except Exception as exc:
-                await session.rollback()
-                item = await session.get(IngestionItem, item.id)
-                if item is None:
-                    return
-                await _error(
-                    session,
-                    item,
-                    IngestionState.STORING,
-                    exc,
-                    retryable=not isinstance(exc, IntegrityError),
-                )
-            item.locked_at = None
+            batch.state = IngestionState.QUEUED
+            batch.started_at = datetime.now(UTC)
             await session.commit()
+            while True:
+                batch = await session.get(IngestionBatch, batch_id)
+                if not batch:
+                    return
+                if batch.cancel_requested:
+                    batch.state = IngestionState.CANCELLED
+                    await session.execute(
+                        IngestionItem.__table__.update()
+                        .where(IngestionItem.batch_id == batch_id)
+                        .where(~IngestionItem.state.in_(list(TERMINAL_STATES)))
+                        .values(state=IngestionState.CANCELLED)
+                    )
+                    await session.commit()
+                    return
+                if batch.pause_requested:
+                    batch.state = IngestionState.DISCOVERED
+                    await session.commit()
+                    return
+                item = await session.scalar(
+                    select(IngestionItem)
+                    .where(IngestionItem.batch_id == batch_id)
+                    .where(~IngestionItem.state.in_(list(TERMINAL_STATES)))
+                    .order_by(IngestionItem.created_at)
+                    .with_for_update(skip_locked=True)
+                    .limit(1)
+                )
+                if item is None:
+                    pending_id = await session.scalar(
+                        select(IngestionItem.id)
+                        .where(IngestionItem.batch_id == batch_id)
+                        .where(~IngestionItem.state.in_(list(TERMINAL_STATES)))
+                        .limit(1)
+                    )
+                    if pending_id is not None:
+                        await session.rollback()
+                        await asyncio.sleep(0.2)
+                        continue
+                    failed_retryable = await session.scalar(
+                        select(IngestionItem.id)
+                        .where(IngestionItem.batch_id == batch_id)
+                        .where(IngestionItem.state == IngestionState.FAILED_RETRYABLE)
+                        .limit(1)
+                    )
+                    failed_terminal = await session.scalar(
+                        select(IngestionItem.id)
+                        .where(IngestionItem.batch_id == batch_id)
+                        .where(IngestionItem.state == IngestionState.FAILED_TERMINAL)
+                        .limit(1)
+                    )
+                    batch.state = (
+                        IngestionState.FAILED_RETRYABLE
+                        if failed_retryable is not None
+                        else IngestionState.FAILED_TERMINAL
+                        if failed_terminal is not None
+                        else IngestionState.COMPLETED
+                    )
+                    batch.completed_at = datetime.now(UTC)
+                    await session.commit()
+                    return
+                item.locked_at = datetime.now(UTC)
+                try:
+                    await _process_item(session, item)
+                except Exception as exc:
+                    await session.rollback()
+                    item = await session.get(IngestionItem, item.id)
+                    if item is None:
+                        return
+                    await _error(
+                        session,
+                        item,
+                        IngestionState.STORING,
+                        exc,
+                        retryable=not isinstance(exc, IntegrityError),
+                    )
+                item.locked_at = None
+                await session.commit()
+    except Exception as exc:
+        logger.exception("ingestion worker crashed for batch %s", batch_id)
+        # A task failure must never leave the UI showing QUEUED forever.
+        try:
+            async with SessionFactory() as recovery_session:
+                batch = await recovery_session.get(IngestionBatch, batch_id)
+                if batch is None:
+                    return
+                items = (
+                    await recovery_session.scalars(
+                        select(IngestionItem).where(IngestionItem.batch_id == batch_id)
+                    )
+                ).all()
+                message = f"worker crashed: {type(exc).__name__}: {exc}"[-4000:]
+                for item in items:
+                    if item.state not in TERMINAL_STATES:
+                        item.state = IngestionState.FAILED_RETRYABLE
+                        item.last_error = message
+                        item.locked_at = None
+                batch.state = IngestionState.FAILED_RETRYABLE
+                batch.completed_at = datetime.now(UTC)
+                await recovery_session.commit()
+        except Exception:
+            logger.exception("failed to record worker failure for batch %s", batch_id)
 
 
 async def resume_incomplete_batches() -> None:

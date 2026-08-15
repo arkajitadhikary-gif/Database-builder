@@ -140,6 +140,18 @@ export interface EmbeddingBackfillResponse {
   dimension: number;
 }
 
+export interface DatabaseTable {
+  key: string;
+  label: string;
+  count: number;
+  columns: string[];
+  rows: Record<string, string | number | null>[];
+}
+
+export interface DatabaseOverview {
+  tables: DatabaseTable[];
+}
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8765/api/v1";
 let sessionToken: string | null = null;
 let sessionTokenPromise: Promise<void> | null = null;
@@ -194,6 +206,7 @@ export const api = {
   getBatchItems: (id: string) => request<BatchItem[]>(`/batches/${id}/items`),
   getPages: (id: string) => request<PageRecord[]>(`/documents/${id}/pages`),
   getStructure: (id: string) => request<DocumentStructure>(`/documents/${id}/structure`),
+  getDatabaseOverview: () => request<DatabaseOverview>("/database/overview", undefined, 30000),
   createBatch: (paths: string[], recursive: boolean) =>
     request<Batch>("/batches", {
       method: "POST",

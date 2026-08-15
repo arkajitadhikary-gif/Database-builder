@@ -163,6 +163,18 @@ td code { display: block; margin-top: 4px; }
 .count-list > div:last-child, .settings-list > div:last-child { border-bottom: 0; }
 .count-list span, .settings-list span { color: var(--muted); }
 .count-list strong { font-size: 1.1rem; }
+.database-layout { padding-top: 28px; }
+.database-browser { min-width: 0; }
+.database-tabs { display: flex; flex-wrap: wrap; gap: 7px; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+.database-tabs button { border: 1px solid var(--line); background: var(--soft); color: var(--muted); border-radius: 7px; padding: 7px 9px; font-size: .7rem; font-weight: 700; }
+.database-tabs button:hover, .database-tabs button.active { border-color: #abb8ee; color: var(--accent); background: #eef1ff; }
+.database-tabs button span { margin-left: 6px; color: #8a96a8; font-family: "IBM Plex Mono", monospace; font-size: .65rem; }
+.database-table-meta { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .7rem; padding: 15px 0 8px; }
+.database-table { max-height: 470px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.database-table table { min-width: 760px; }
+.database-table th { position: sticky; top: 0; background: var(--panel); z-index: 1; padding-top: 11px; }
+.database-table td { max-width: 270px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: "IBM Plex Mono", monospace; font-size: .66rem; }
+.database-table td:first-child { color: var(--muted); }
 .settings-grid { padding-top: 28px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .65fr); gap: 18px; }
 @media (max-width: 1280px) { .main-content { padding-left: 30px; padding-right: 30px; } .hero-illustration { width: 190px; } }
 
