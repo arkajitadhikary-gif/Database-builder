@@ -1,24 +1,72 @@
-# Judicore Legal Database Builder
+# Database Builder
 
-Judicore is a local-first Windows desktop application for converting user-selected Indian legal PDFs into a durable, structured, searchable PostgreSQL corpus. The source PDF remains authoritative. The system preserves the original path and SHA-256 digest, each page’s raw and normalized text, deterministic legal structure, page provenance, retrieval chunks, and optional embeddings.
+**Database Builder** is an intelligent, universal, local-first engine and spreadsheet studio that converts any document or PDF (invoices, research papers, financial statements, catalogs, logs, forms, official records, legal contracts, reports, etc.) into durable, structured, multi-table relational databases in PostgreSQL.
 
-The canonical implementation is split into a **Tauri 2 desktop shell**, a **React + TypeScript UI**, and an authoritative **FastAPI + SQLAlchemy + Alembic backend**. The backend owns discovery, validation, hashing, PyMuPDF extraction, OCR branching, normalization, classification, legal parsing, persistence, full-text indexing, embeddings, and retrieval. The frontend never stores canonical state in browser memory or local storage.
+With integrated **Groq Llama 3 AI extraction**, it automatically identifies the document category, determines the domain schema, designs clean normalized tables, and extracts every row and column with high fidelity. You can inspect, edit, filter, and export the resulting tables instantly as **SQL DDL + Inserts**, **Excel-ready CSV (UTF-8 BOM)**, or **JSON**.
 
-## Repository layout
+---
 
-| Path | Responsibility |
+## Key Highlights
+
+- **Universal PDF & Document Intelligence**: No longer bound to any single document category. Handles invoices, medical records, financial statements, technical datasheets, surveys, and research documents automatically.
+- **Groq Llama 3 Fast Extraction**: High-speed, high-accuracy structured data extraction with intelligent type inference (`string`, `number`, `boolean`, `date`, `currency`).
+- **Interactive Spreadsheet Studio**:
+  - Full-fidelity table viewer with column headers, data types, and row indices.
+  - Cell editing, manual row addition, and instant row deletion.
+  - Multi-table tabs for complex PDFs containing multiple extracted structures.
+  - Quick table deletion and batch document deletion with zero lag.
+  - Collapsible responsive sidebar for maximized workspace view.
+- **Developer-Grade Exports**:
+  - **SQL**: Production-ready PostgreSQL DDL (`DROP TABLE`, `CREATE TABLE` with typed columns) and batch `INSERT INTO` statements.
+  - **CSV**: Excel-compliant UTF-8 with BOM support for seamless viewing without encoding issues.
+  - **JSON**: Clean, structured key-value arrays with full provenance.
+- **Local-First & Privacy-Focused**: Source documents stay on your machine. Data is stored directly into your local PostgreSQL database with complete provenance tracking (page numbers and original files).
+
+---
+
+## Repository Layout
+
+| Directory / File | Description |
 | --- | --- |
-| `backend/app` | FastAPI API, SQLAlchemy models, ingestion worker, PDF/OCR/parsers, chunking, embeddings, retrieval |
-| `backend/alembic` | PostgreSQL schema migration and pgvector/FTS trigger setup |
-| `frontend/src` | Desktop operational UI and typed backend client |
-| `src-tauri` | Tauri 2 shell, restricted capabilities, backend sidecar bootstrap and shutdown |
-| `scripts` | Windows sidecar build and PostgreSQL backup/restore/verification scripts |
-| `docs` | Architecture and runtime/acceptance notes |
-| `storage` | Project-local reference/archive roots; originals are never modified automatically |
+| `backend/app/api` | FastAPI REST API endpoints (documents, universal tables, live exports, health) |
+| `backend/app/services` | Groq AI extraction engine, PyMuPDF parsers, OCR, chunking, retrieval |
+| `backend/app/db` | SQLAlchemy asynchronous models, PostgreSQL session management |
+| `backend/alembic` | Alembic migrations for database schema and pgvector support |
+| `frontend/src` | React + TypeScript + Vite UI with modern Spreadsheet Studio |
+| `src-tauri` | Tauri 2 desktop shell configuration |
+| `docker-compose.yml` | Isolated local PostgreSQL 16 container with `pgvector` |
 
-## Run the backend
+---
 
-The backend requires Python 3.12+, PostgreSQL 16 with the `vector` extension, and optional Tesseract plus OCRmyPDF for scanned documents. Copy `.env.example` to `.env`, configure `DATABASE_URL`, create the database, then run:
+## Quick Start Guide
+
+### 1. Start the PostgreSQL Database
+
+Using Docker Desktop:
+
+```powershell
+docker compose up -d postgres
+```
+
+This starts PostgreSQL on `127.0.0.1:55432` with user `postgres` and database `judicore_hardened`.
+
+---
+
+### 2. Configure Environment Variables
+
+Create `.env` inside the `backend` folder (or copy from `.env.example`):
+
+```env
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:55432/judicore_hardened
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL=llama-3.3-70b-versatile
+```
+
+> **Tip:** You can obtain a free Groq API key at [console.groq.com](https://console.groq.com).
+
+---
+
+### 3. Run the Backend
 
 ```powershell
 cd backend
@@ -27,19 +75,15 @@ uv run alembic upgrade head
 uv run python run.py --host 127.0.0.1 --port 8765
 ```
 
-The health endpoints are `GET /api/v1/health/live`, `GET /api/v1/health`, and `GET /api/v1/setup`. They report actual dependency state; they do not synthesize readiness. Embedding health checks local model availability without downloading or loading model weights, so the first embedding operation may download the configured model when it is not cached. When `SESSION_TOKEN` or `JUDICORE_SESSION_TOKEN` is configured, only the liveness endpoint is public; all other API calls require `Authorization: Bearer <token>`. The packaged Tauri shell generates this token per process and sends it to the sidecar and frontend through a restricted command.
+The backend API will start at `http://127.0.0.1:8765`.
+- Health check: `GET http://127.0.0.1:8765/api/v1/health`
+- Interactive API docs: `http://127.0.0.1:8765/docs`
 
-## Optional local PostgreSQL stack
+---
 
-If Docker Desktop is available on Windows, the isolated development database can be started with:
+### 4. Run the Frontend
 
-```powershell
-docker compose up -d postgres
-```
-
-The compose file binds PostgreSQL to loopback only. It does not overwrite an existing PostgreSQL installation. Run migrations before importing documents.
-
-## Run the frontend
+In a separate terminal:
 
 ```powershell
 cd frontend
@@ -47,36 +91,34 @@ pnpm install
 pnpm dev
 ```
 
-The Tauri UI uses the native dialog plugin to send filesystem paths directly to the backend. It does not upload entire folders through browser memory. During a desktop build, Tauri runs the frontend and connects it to the local FastAPI endpoint.
+Open your browser at `http://localhost:1420` to access the **Database Builder** Dashboard and Spreadsheet Studio.
 
-## Build the Windows desktop package
+---
 
-The sandbox used to develop this repository does not contain the Windows Rust/Tauri toolchain, PostgreSQL server, pgvector extension, or OCR executables. On a Windows build machine, install Rust, Visual Studio Build Tools with the desktop C++ workload, WebView2, Node.js, pnpm, Python 3.12, PostgreSQL 16, pgvector, Tesseract, and OCRmyPDF. Then run:
+### 5. Automated Scripts (Windows)
 
-```powershell
-.\scripts\build_backend_windows.ps1
-cargo install tauri-cli --version ^2
-cargo tauri build --manifest-path src-tauri\tauri.conf.json
-```
+You can also use the root scripts for convenient one-click startup and shutdown:
 
-The sidecar build script packages `backend/run.py` as `judicore-backend.exe`, downloads the configured embedding model into `src-tauri/resources/backend/models`, and copies the sidecar into `src-tauri/resources/backend`. Tauri refuses to start when the sidecar is absent or when the liveness endpoint does not become healthy within 30 seconds. Packaged storage is redirected to the per-user Tauri application-data directory, not the install directory.
+- **Start**: `.\start_judicore.bat` or `.\start_judicore.ps1`
+- **Stop**: `.\stop_judicore.bat` or `.\stop_judicore.ps1`
 
-## Ingestion and retrieval
+---
 
-A batch follows the durable path `Discovery → Validation → SHA-256 → Duplicate/Version Analysis → Page Extraction → OCR Decision/Execution → Raw Text → Normalization → Classification → Legal Parsing → Metadata → Page Provenance → Legal-Aware Chunking → PostgreSQL → FTS → Embeddings/pgvector → Validation → Completed`. Unsupported files are persisted as `SKIPPED_UNSUPPORTED`. Exact duplicates are skipped by binary SHA-256, while normalized-text duplicates are preserved with a duplicate evidence record rather than silently discarded.
+## How It Works
 
-The retrieval API supports PostgreSQL FTS, pgvector cosine similarity, metadata filtering, and reciprocal-rank fusion for hybrid retrieval. Every result includes source path, page range, document type, and section or paragraph metadata. Semantic and hybrid search report `NO_INDEXED_VECTORS` when embeddings are not persisted instead of implying semantic coverage. `POST /api/v1/embeddings/backfill` performs a bounded, row-locked retry for missing vectors. `GET /api/v1/documents/{id}/pages` and `GET /api/v1/documents/{id}/structure` expose persisted raw/normalized pages, Act sections, judgment paragraphs, and references for inspection.
+1. **Upload Documents**: Drag and drop any PDF file in the Dashboard or select via the file dialog.
+2. **AI Understanding**: The backend parses the PDF text/pages and uses Groq Llama 3 to classify the document type and construct normalized tabular representations.
+3. **Spreadsheet Studio**:
+   - Browse tables in the sidebar grouped by document.
+   - Filter, inspect, and add or delete rows.
+   - Re-extract anytime with adjusted prompts if needed.
+4. **Export**:
+   - Click **Export SQL** to generate a `.sql` script ready to run in any database tool (pgAdmin, DBeaver, psql).
+   - Click **Export CSV** for Excel and spreadsheet workflows.
+   - Click **Export JSON** for programmatic API and pipeline integration.
 
-## Read-only database and AI access
+---
 
-The **Table explorer** is a spreadsheet-style, read-only view over all domain and operational tables. It supports vertical and horizontal scrolling, optional long-cell wrapping, paged results, and a row/cell detail screen with provenance. Embedding vectors are intentionally excluded from the visual grid; metadata remains visible. Tables with a composite key (for example `judgment_judges`) are readable but do not expose a single-row detail link.
+## License
 
-AI clients can use the read-only OpenAPI contract at `/docs` and the bounded endpoints `/api/v1/ai/capabilities`, `/api/v1/ai/search`, `/api/v1/ai/tables/{table_key}`, `/api/v1/ai/tables/{table_key}/{row_id}`, and `/api/v1/ai/documents/{document_id}/context`. A small read-only MCP JSON-RPC adapter is available at `POST /api/v1/mcp` with `initialize`, `tools/list`, and `tools/call` for search, document context, table rows, and row provenance. Set `AI_READ_TOKEN` before exposing these endpoints beyond the local machine.
-
-AI verification is provider-neutral and opt-in (`AI_VERIFICATION_ENABLED=false` by default). The default adapter targets a local OpenAI-compatible NVIDIA NIM endpoint. Hosted transfer is rejected unless `AI_NIM_HOSTED_ALLOWED=true`; the deterministic parser and source PDF remain authoritative. A mismatch creates a persisted verification run/finding and quarantines the item as `REVIEW_REQUIRED`; AI never overwrites canonical legal text. Review findings appear under **Failures**.
-
-## Production hardening boundaries
-
-The initial Alembic migration is a frozen schema snapshot and no longer depends on the current ORM metadata at runtime. `0003_schema_hardening` checks the expected migration revision, pgvector availability, vector dimension, and document integrity constraints. Migrations never drop production data unless `JUDICORE_ALLOW_DESTRUCTIVE_MIGRATIONS=YES` is explicitly set. Backup and restore scripts require a deliberate confirmation switch for destructive restore.
-
-Recursive imports are bounded by `MAX_DISCOVERED_FILES`, individual PDFs by `MAX_PDF_BYTES`, database connections by `DATABASE_CONNECT_TIMEOUT_SECONDS`, and OCR by `OCR_TIMEOUT_SECONDS`. Missing source paths do not delete canonical rows; they mark the canonical record as missing and preserve its provenance. No legal facts or production corpus data are seeded by this repository.
+Open source and community friendly.
