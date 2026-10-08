@@ -19,6 +19,8 @@ from app.db.models import (
     DuplicateKind,
     DuplicateRecord,
     Embedding,
+    ExtractedRow,
+    ExtractedTable,
     IngestionBatch,
     IngestionError,
     IngestionItem,
@@ -39,6 +41,7 @@ from app.db.session import SessionFactory
 from app.services.chunking import build_chunks
 from app.services.discovery import sha256_file, sha256_text, validate_pdf
 from app.services.embeddings import get_embedding_provider
+from app.services.groq_extractor import extract_with_groq
 from app.services.parsers import parse_judgment, parse_legislation
 from app.services.pdf import extract_pdf, extract_with_ocr
 from app.services.text import classify_document
@@ -429,11 +432,56 @@ async def _process_item(session, item: IngestionItem) -> None:
         item.document_id = None
         await session.delete(document)
         return
-    document.title = parsed.title
+    document.title = parsed.title or path.stem.replace("_", " ")
     if parsed.year and not document.document_date:
         document.document_date = datetime(parsed.year, 1, 1).date()
     await session.flush()
     await _persist_parsed_structure(session, document, parsed, classification.document_type)
+
+    # Universal Document Intelligence & Excel Table Extraction via Groq
+    try:
+        groq_result = await extract_with_groq(extracted.pages, path.name)
+        doc_meta = dict(document.metadata_json or {})
+        doc_meta["detected_category"] = groq_result.document_category
+        doc_meta["ai_summary"] = groq_result.summary
+        doc_meta["key_entities"] = groq_result.key_entities
+        doc_meta["extraction_model"] = groq_result.model_used
+        document.metadata_json = doc_meta
+        if groq_result.title and (not document.title or document.title == path.name):
+            document.title = groq_result.title
+        if groq_result.document_date and not document.document_date:
+            try:
+                document.document_date = datetime.strptime(str(groq_result.document_date)[:10], "%Y-%m-%d").date()
+            except Exception:
+                pass
+
+        for t_res in groq_result.tables:
+            table_row = ExtractedTable(
+                document_id=document.id,
+                table_name=t_res.table_name,
+                table_slug=t_res.table_slug,
+                document_category=groq_result.document_category,
+                description=t_res.description,
+                columns=t_res.columns,
+                row_count=len(t_res.rows),
+            )
+            session.add(table_row)
+            await session.flush()
+
+            for r_idx, r_data in enumerate(t_res.rows, start=1):
+                clean_data = dict(r_data)
+                source_p = clean_data.pop("source_page", 1) if isinstance(clean_data, dict) else 1
+                row_entity = ExtractedRow(
+                    table_id=table_row.id,
+                    row_index=r_idx,
+                    data=clean_data,
+                    source_page=int(source_p) if isinstance(source_p, (int, str)) and str(source_p).isdigit() else 1,
+                    confidence=0.95,
+                )
+                session.add(row_entity)
+            await session.flush()
+    except Exception as exc:
+        logger.warning("Universal table extraction encountered non-fatal error: %s", exc)
 
     await _transition(session, item, IngestionState.CHUNKING)
     drafts = build_chunks(

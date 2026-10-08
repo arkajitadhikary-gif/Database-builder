@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     ocr_enabled: bool = True
     ocr_timeout_seconds: int = 180
     log_level: str = "INFO"
+    groq_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GROQ_API_KEY", "groq_api_key"),
+    )
+    groq_model: str = Field(
+        default="qwen/qwen3.8-27b",
+        validation_alias=AliasChoices("GROQ_MODEL", "groq_model"),
+    )
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     session_token: str | None = Field(
         default=None,
         validation_alias=AliasChoices("SESSION_TOKEN", "JUDICORE_SESSION_TOKEN"),

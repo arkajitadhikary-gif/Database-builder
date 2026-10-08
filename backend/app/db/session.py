@@ -8,7 +8,7 @@ from app.core.config import get_settings
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
-EXPECTED_SCHEMA_REVISION = "0005_ai_verification"
+EXPECTED_SCHEMA_REVISION = "0006_universal_tables"
 engine = create_async_engine(
     str(settings.database_url),
     echo=False,

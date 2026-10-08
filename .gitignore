@@ -25,3 +25,4 @@ storage/reference/*
 storage/archive/*
 backups/
 *.log
+.pnpm-store/

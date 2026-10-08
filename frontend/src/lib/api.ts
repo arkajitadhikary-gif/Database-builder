@@ -235,6 +235,49 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs = 15000): 
   }
 }
 
+export interface ExtractedColumnDef {
+  key: string;
+  label: string;
+  type: string;
+}
+
+export interface ExtractedTableSummary {
+  id: string;
+  document_id: string;
+  document_title: string | null;
+  document_filename: string;
+  document_category: string;
+  table_name: string;
+  table_slug: string;
+  description: string | null;
+  columns: ExtractedColumnDef[];
+  row_count: number;
+  created_at: string;
+}
+
+export interface ExtractedTableRow {
+  id: string;
+  table_id: string;
+  row_index: number;
+  data: Record<string, unknown>;
+  source_page: number | null;
+  confidence: number | null;
+}
+
+export interface ExtractedTableDetail {
+  table: ExtractedTableSummary;
+  rows: ExtractedTableRow[];
+  total_rows: number;
+  offset: number;
+  limit: number;
+}
+
+export interface GroqConfig {
+  configured: boolean;
+  model: string;
+  available_models: string[];
+}
+
 export const api = {
   getSetup: () => request<SetupResponse>("/setup"),
   getBatches: () => request<Batch[]>("/batches"),
@@ -249,6 +292,47 @@ export const api = {
   getDatabaseRecord: (key: string, id: string) =>
     request<DatabaseRecord>(`/database/tables/${encodeURIComponent(key)}/${encodeURIComponent(id)}`, undefined, 30000),
   getVerificationReviews: () => request<VerificationReview[]>('/verification/reviews', undefined, 30000),
+  getExtractedTables: (documentId?: string, category?: string, search?: string) => {
+    const params = new URLSearchParams();
+    if (documentId) params.append("document_id", documentId);
+    if (category) params.append("category", category);
+    if (search) params.append("search", search);
+    return request<ExtractedTableSummary[]>(`/tables?${params.toString()}`);
+  },
+  getExtractedTable: (id: string, search?: string, offset = 0, limit = 100) => {
+    const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+    if (search) params.append("search", search);
+    return request<ExtractedTableDetail>(`/tables/${encodeURIComponent(id)}?${params.toString()}`);
+  },
+  extractDocumentTables: (documentId: string) =>
+    request<ExtractedTableSummary[]>(`/documents/${encodeURIComponent(documentId)}/extract-tables`, { method: "POST" }, 120000),
+  addTableRow: (tableId: string, data: Record<string, unknown>, sourcePage = 1) =>
+    request<ExtractedTableRow>(`/tables/${encodeURIComponent(tableId)}/rows`, {
+      method: "POST",
+      body: JSON.stringify({ data, source_page: sourcePage }),
+    }),
+  updateTableRow: (tableId: string, rowId: string, data: Record<string, unknown>) =>
+    request<ExtractedTableRow>(`/tables/${encodeURIComponent(tableId)}/rows/${encodeURIComponent(rowId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ data }),
+    }),
+  deleteTableRow: (tableId: string, rowId: string) =>
+    request<void>(`/tables/${encodeURIComponent(tableId)}/rows/${encodeURIComponent(rowId)}`, { method: "DELETE" }),
+  deleteTable: (tableId: string) =>
+    request<void>(`/tables/${encodeURIComponent(tableId)}`, { method: "DELETE" }),
+  deleteDocument: (documentId: string) =>
+    request<void>(`/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }),
+  resetAllData: () =>
+    request<{ status: string; message: string }>("/system/reset-all", { method: "POST" }),
+  getGroqConfig: () => request<GroqConfig>("/config/groq"),
+  updateGroqConfig: (apiKey?: string, model?: string) =>
+    request<GroqConfig>("/config/groq", {
+      method: "POST",
+      body: JSON.stringify({ api_key: apiKey, model }),
+    }),
+  getTableExportCsvUrl: (tableId: string) => `${API_BASE}/tables/${encodeURIComponent(tableId)}/export/csv`,
+  getTableExportJsonUrl: (tableId: string) => `${API_BASE}/tables/${encodeURIComponent(tableId)}/export/json`,
+  getTableExportSqlUrl: (tableId: string) => `${API_BASE}/tables/${encodeURIComponent(tableId)}/export/sql`,
   createBatch: (paths: string[], recursive: boolean) =>
     request<Batch>("/batches", {
       method: "POST",
@@ -280,3 +364,4 @@ export const api = {
 };
 
 export { API_BASE };
+

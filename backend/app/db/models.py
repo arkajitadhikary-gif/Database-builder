@@ -155,6 +155,9 @@ class Document(Base, TimestampMixin):
     judgments: Mapped[list[Judgment]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
+    tables: Mapped[list[ExtractedTable]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
 
 
 class Page(Base, TimestampMixin):
@@ -572,3 +575,47 @@ class SystemSetting(Base, TimestampMixin):
     __tablename__ = "system_settings"
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+
+class ExtractedTable(Base, TimestampMixin):
+    __tablename__ = "extracted_tables"
+    __table_args__ = (
+        Index("ix_extracted_tables_document_id", "document_id"),
+        Index("ix_extracted_tables_category", "document_category"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    table_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    table_slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    document_category: Mapped[str] = mapped_column(String(128), default="General Document", nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    columns: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="tables")
+    rows: Mapped[list[ExtractedRow]] = relationship(
+        back_populates="table", cascade="all, delete-orphan", order_by="ExtractedRow.row_index"
+    )
+
+
+class ExtractedRow(Base, TimestampMixin):
+    __tablename__ = "extracted_rows"
+    __table_args__ = (
+        Index("ix_extracted_rows_table_id", "table_id"),
+        Index("ix_extracted_rows_row_index", "table_id", "row_index"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    table_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("extracted_tables.id", ondelete="CASCADE"), nullable=False
+    )
+    row_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    source_page: Mapped[int | None] = mapped_column(Integer)
+    confidence: Mapped[float | None] = mapped_column()
+
+    table: Mapped[ExtractedTable] = relationship(back_populates="rows")
+

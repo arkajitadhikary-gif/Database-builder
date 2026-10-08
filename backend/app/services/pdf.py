@@ -73,6 +73,12 @@ def resolve_executable(name: str) -> str | None:
     if venv_bin.exists():
         candidates.append(venv_bin)
 
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        user_tesseract_dir = Path(local_app_data) / "Tesseract-OCR"
+        if user_tesseract_dir.exists():
+            candidates.append(user_tesseract_dir)
+
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         if entry:
             path = Path(entry).expanduser()

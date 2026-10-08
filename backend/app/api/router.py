@@ -8,8 +8,12 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from sqlalchemy import desc, func, select
+import csv
+import io
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import StreamingResponse
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -20,6 +24,8 @@ from app.db.models import (
     Chunk,
     Document,
     Embedding,
+    ExtractedRow,
+    ExtractedTable,
     IngestionBatch,
     IngestionItem,
     IngestionState,
@@ -44,12 +50,20 @@ from app.schemas.api import (
     DocumentStructureResponse,
     EmbeddingBackfillRequest,
     EmbeddingBackfillResponse,
+    ExtractedColumnDefinition,
+    ExtractedTableDetailResponse,
+    ExtractedTableRowResponse,
+    ExtractedTableSummaryResponse,
+    GroqConfigResponse,
+    GroqConfigUpdateRequest,
     HealthComponent,
     JudgmentParagraphResponse,
     JudgmentStructureResponse,
     LegalSectionResponse,
     PageResponse,
     ReferenceResponse,
+    RowCreateRequest,
+    RowUpdateRequest,
     SearchRequest,
     SearchResponse,
     SetupResponse,
@@ -58,6 +72,7 @@ from app.schemas.api import (
 )
 from app.services.discovery import discover_paths
 from app.services.embedding_jobs import embed_missing_chunks
+from app.services.groq_extractor import extract_with_groq
 from app.services.embeddings import check_embedding_provider
 from app.services.pdf import ocr_available, resolve_executable
 from app.services.retrieval import hybrid_search
@@ -1430,3 +1445,572 @@ async def search(
         return await hybrid_search(session, payload)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Universal Extracted Tables & Groq AI Endpoints
+# ---------------------------------------------------------------------------
+
+
+@api_router.get("/tables", response_model=list[ExtractedTableSummaryResponse], tags=["universal-tables"])
+async def list_extracted_tables(
+    document_id: UUID | None = None,
+    category: str | None = None,
+    search: str | None = None,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[ExtractedTableSummaryResponse]:
+    query = (
+        select(ExtractedTable)
+        .options(joinedload(ExtractedTable.document))
+        .order_by(desc(ExtractedTable.created_at))
+    )
+    if document_id:
+        query = query.where(ExtractedTable.document_id == document_id)
+    if category:
+        query = query.where(ExtractedTable.document_category == category)
+    if search:
+        search_filter = f"%{search.strip().lower()}%"
+        query = query.where(
+            func.lower(ExtractedTable.table_name).like(search_filter)
+            | func.lower(ExtractedTable.description).like(search_filter)
+        )
+
+    rows = (await session.scalars(query.offset(offset).limit(limit))).unique().all()
+    results: list[ExtractedTableSummaryResponse] = []
+    for t in rows:
+        results.append(
+            ExtractedTableSummaryResponse(
+                id=t.id,
+                document_id=t.document_id,
+                document_title=t.document.title if t.document else None,
+                document_filename=t.document.filename if t.document else "",
+                document_category=t.document_category,
+                table_name=t.table_name,
+                table_slug=t.table_slug,
+                description=t.description,
+                columns=[ExtractedColumnDefinition(**c) for c in (t.columns or [])],
+                row_count=t.row_count,
+                created_at=t.created_at,
+            )
+        )
+    return results
+
+
+@api_router.get("/tables/{table_id}", response_model=ExtractedTableDetailResponse, tags=["universal-tables"])
+async def get_extracted_table(
+    table_id: UUID,
+    search: str | None = None,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ExtractedTableDetailResponse:
+    table = await session.scalar(
+        select(ExtractedTable)
+        .options(joinedload(ExtractedTable.document))
+        .where(ExtractedTable.id == table_id)
+    )
+    if not table:
+        raise HTTPException(status_code=404, detail="Extracted table not found")
+
+    rows_query = select(ExtractedRow).where(ExtractedRow.table_id == table_id).order_by(ExtractedRow.row_index)
+    all_rows = (await session.scalars(rows_query)).all()
+
+    filtered_rows = all_rows
+    if search:
+        term = search.strip().lower()
+        filtered_rows = [
+            r
+            for r in all_rows
+            if any(term in str(v).lower() for v in (r.data or {}).values())
+        ]
+
+    paginated = filtered_rows[offset : offset + limit]
+
+    summary = ExtractedTableSummaryResponse(
+        id=table.id,
+        document_id=table.document_id,
+        document_title=table.document.title if table.document else None,
+        document_filename=table.document.filename if table.document else "",
+        document_category=table.document_category,
+        table_name=table.table_name,
+        table_slug=table.table_slug,
+        description=table.description,
+        columns=[ExtractedColumnDefinition(**c) for c in (table.columns or [])],
+        row_count=len(all_rows),
+        created_at=table.created_at,
+    )
+
+    return ExtractedTableDetailResponse(
+        table=summary,
+        rows=[
+            ExtractedTableRowResponse(
+                id=r.id,
+                table_id=r.table_id,
+                row_index=r.row_index,
+                data=r.data,
+                source_page=r.source_page,
+                confidence=r.confidence,
+            )
+            for r in paginated
+        ],
+        total_rows=len(filtered_rows),
+        offset=offset,
+        limit=limit,
+    )
+
+
+@api_router.get("/tables/{table_id}/export/csv", tags=["universal-tables"])
+async def export_table_csv(
+    table_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    table = await session.scalar(select(ExtractedTable).where(ExtractedTable.id == table_id))
+    if not table:
+        raise HTTPException(status_code=404, detail="Extracted table not found")
+
+    rows = (
+        await session.scalars(
+            select(ExtractedRow).where(ExtractedRow.table_id == table_id).order_by(ExtractedRow.row_index)
+        )
+    ).all()
+
+    output = io.StringIO()
+    # Write UTF-8 BOM so Microsoft Excel correctly displays utf-8 characters
+    output.write("\ufeff")
+
+    columns = table.columns or []
+    has_source_page = any(c.get("key") == "source_page" for c in columns)
+    col_keys = [c["key"] for c in columns]
+    col_labels = [c.get("label", c["key"]) for c in columns]
+
+    writer = csv.writer(output)
+    if not has_source_page:
+        writer.writerow(["#", *col_labels, "Source Page"])
+    else:
+        writer.writerow(["#", *col_labels])
+
+    for r in rows:
+        row_data = r.data or {}
+        row_values = []
+        for k in col_keys:
+            val = row_data.get(k)
+            if k == "source_page" and (val is None or val == ""):
+                val = r.source_page or 1
+            row_values.append(str(val or "") if val is not None else "")
+        if not has_source_page:
+            writer.writerow([r.row_index, *row_values, r.source_page or 1])
+        else:
+            writer.writerow([r.row_index, *row_values])
+
+    csv_bytes = output.getvalue().encode("utf-8")
+    filename = f"{table.table_slug or 'table'}.csv"
+
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api_router.get("/tables/{table_id}/export/json", tags=["universal-tables"])
+async def export_table_json(
+    table_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    table = await session.scalar(select(ExtractedTable).where(ExtractedTable.id == table_id))
+    if not table:
+        raise HTTPException(status_code=404, detail="Extracted table not found")
+
+    rows = (
+        await session.scalars(
+            select(ExtractedRow).where(ExtractedRow.table_id == table_id).order_by(ExtractedRow.row_index)
+        )
+    ).all()
+
+    payload = {
+        "table_name": table.table_name,
+        "table_slug": table.table_slug,
+        "category": table.document_category,
+        "columns": table.columns,
+        "row_count": len(rows),
+        "rows": [{"#": r.row_index, **(r.data or {}), "_source_page": r.source_page} for r in rows],
+    }
+    json_bytes = json.dumps(payload, indent=2, default=str).encode("utf-8")
+    filename = f"{table.table_slug or 'table'}.json"
+
+    return Response(
+        content=json_bytes,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api_router.get("/tables/{table_id}/export/sql", tags=["universal-tables"])
+async def export_table_sql(
+    table_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    table = await session.scalar(
+        select(ExtractedTable)
+        .options(joinedload(ExtractedTable.document))
+        .where(ExtractedTable.id == table_id)
+    )
+    if not table:
+        raise HTTPException(status_code=404, detail="Extracted table not found")
+
+    rows = (
+        await session.scalars(
+            select(ExtractedRow).where(ExtractedRow.table_id == table_id).order_by(ExtractedRow.row_index)
+        )
+    ).all()
+
+    slug = table.table_slug or "extracted_data"
+    columns = table.columns or []
+    doc_filename = table.document.filename if table.document else "unknown.pdf"
+
+    type_map = {
+        "number": "NUMERIC",
+        "date": "DATE",
+        "boolean": "BOOLEAN",
+        "string": "TEXT",
+    }
+
+    lines = [
+        f"-- ====================================================================",
+        f"-- Table: {table.table_name}",
+        f"-- Document: {doc_filename}",
+        f"-- Extracted by Database Builder AI Engine",
+        f"-- Total Records: {len(rows)}",
+        f"-- ====================================================================",
+        "",
+        f"DROP TABLE IF EXISTS {slug};",
+        f"CREATE TABLE {slug} (",
+        "    id SERIAL PRIMARY KEY,",
+    ]
+
+    has_source_page_col = any(c.get("key") == "source_page" for c in columns)
+    for c in columns:
+        col_key = c.get("key", "column")
+        sql_type = type_map.get(str(c.get("type", "string")).lower(), "TEXT")
+        lines.append(f"    {col_key} {sql_type},")
+    if not has_source_page_col:
+        lines.append("    source_page INTEGER DEFAULT 1,")
+    lines.append("    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP")
+    lines.append(");")
+    lines.append("")
+
+    if rows:
+        col_keys = [c["key"] for c in columns]
+        if not has_source_page_col:
+            cols_joined = ", ".join(col_keys) + ", source_page"
+        else:
+            cols_joined = ", ".join(col_keys)
+        lines.append(f"-- ====================================================================")
+        lines.append(f"-- Data Inserts ({len(rows)} rows)")
+        lines.append(f"-- ====================================================================")
+        for r in rows:
+            data = r.data or {}
+            val_strs = []
+            for k in col_keys:
+                v = data.get(k)
+                if k == "source_page" and (v is None or v == ""):
+                    v = r.source_page or 1
+                if v is None or v == "":
+                    val_strs.append("NULL")
+                elif isinstance(v, (int, float)):
+                    val_strs.append(str(v))
+                elif isinstance(v, bool):
+                    val_strs.append("TRUE" if v else "FALSE")
+                else:
+                    escaped = str(v).replace("'", "''")
+                    val_strs.append(f"'{escaped}'")
+            if not has_source_page_col:
+                val_strs.append(str(r.source_page or 1))
+            lines.append(f"INSERT INTO {slug} ({cols_joined}) VALUES ({', '.join(val_strs)});")
+
+    sql_content = "\n".join(lines)
+    filename = f"{slug}.sql"
+
+    return Response(
+        content=sql_content.encode("utf-8"),
+        media_type="application/sql",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api_router.post("/tables/{table_id}/rows", response_model=ExtractedTableRowResponse, status_code=201, tags=["universal-tables"])
+async def add_table_row(
+    table_id: UUID,
+    payload: RowCreateRequest,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ExtractedTableRowResponse:
+    table = await session.scalar(select(ExtractedTable).where(ExtractedTable.id == table_id))
+    if not table:
+        raise HTTPException(status_code=404, detail="Extracted table not found")
+
+    max_idx = (
+        await session.scalar(
+            select(func.coalesce(func.max(ExtractedRow.row_index), 0)).where(ExtractedRow.table_id == table_id)
+        )
+    ) or 0
+
+    new_row = ExtractedRow(
+        table_id=table_id,
+        row_index=max_idx + 1,
+        data=payload.data,
+        source_page=payload.source_page or 1,
+        confidence=1.0,
+    )
+    session.add(new_row)
+    table.row_count += 1
+    await session.commit()
+    await session.refresh(new_row)
+
+    return ExtractedTableRowResponse(
+        id=new_row.id,
+        table_id=new_row.table_id,
+        row_index=new_row.row_index,
+        data=new_row.data,
+        source_page=new_row.source_page,
+        confidence=new_row.confidence,
+    )
+
+
+@api_router.patch("/tables/{table_id}/rows/{row_id}", response_model=ExtractedTableRowResponse, tags=["universal-tables"])
+async def update_table_row(
+    table_id: UUID,
+    row_id: UUID,
+    payload: RowUpdateRequest,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ExtractedTableRowResponse:
+    row = await session.scalar(
+        select(ExtractedRow).where(ExtractedRow.id == row_id, ExtractedRow.table_id == table_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Row not found")
+
+    current_data = dict(row.data or {})
+    current_data.update(payload.data)
+    row.data = current_data
+    await session.commit()
+    await session.refresh(row)
+
+    return ExtractedTableRowResponse(
+        id=row.id,
+        table_id=row.table_id,
+        row_index=row.row_index,
+        data=row.data,
+        source_page=row.source_page,
+        confidence=row.confidence,
+    )
+
+
+@api_router.delete("/tables/{table_id}/rows/{row_id}", status_code=204, tags=["universal-tables"])
+async def delete_table_row(
+    table_id: UUID,
+    row_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> None:
+    row = await session.scalar(
+        select(ExtractedRow).where(ExtractedRow.id == row_id, ExtractedRow.table_id == table_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Row not found")
+
+    table = await session.scalar(select(ExtractedTable).where(ExtractedTable.id == table_id))
+    if table and table.row_count > 0:
+        table.row_count -= 1
+
+    await session.delete(row)
+    await session.commit()
+
+
+@api_router.delete("/tables/{table_id}", status_code=204, tags=["universal-tables"])
+async def delete_table(
+    table_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> None:
+    table = await session.scalar(select(ExtractedTable).where(ExtractedTable.id == table_id))
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+
+    await session.execute(delete(ExtractedRow).where(ExtractedRow.table_id == table_id))
+    await session.delete(table)
+    await session.commit()
+
+
+@api_router.delete("/documents/{document_id}", status_code=204, tags=["documents"])
+async def delete_document(
+    document_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> None:
+    doc = await session.scalar(select(Document).where(Document.id == document_id))
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # 1. Delete extracted tables & rows
+    table_ids = (await session.scalars(select(ExtractedTable.id).where(ExtractedTable.document_id == document_id))).all()
+    if table_ids:
+        await session.execute(delete(ExtractedRow).where(ExtractedRow.table_id.in_(table_ids)))
+        await session.execute(delete(ExtractedTable).where(ExtractedTable.id.in_(table_ids)))
+
+    # 2. Delete embeddings & chunks
+    chunk_ids = (await session.scalars(select(Chunk.id).where(Chunk.document_id == document_id))).all()
+    if chunk_ids:
+        await session.execute(delete(Embedding).where(Embedding.chunk_id.in_(chunk_ids)))
+        await session.execute(delete(Chunk).where(Chunk.id.in_(chunk_ids)))
+
+    # 3. Delete pages, findings, runs
+    await session.execute(delete(Page).where(Page.document_id == document_id))
+    await session.execute(delete(VerificationFinding).where(VerificationFinding.document_id == document_id))
+    await session.execute(delete(VerificationRun).where(VerificationRun.document_id == document_id))
+
+    # 4. Delete ingestion items
+    await session.execute(delete(IngestionItem).where(IngestionItem.document_id == document_id))
+
+    # 5. Delete document
+    await session.delete(doc)
+    await session.commit()
+
+
+@api_router.post("/system/reset-all", tags=["system"])
+async def reset_all_data(
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> dict[str, str]:
+    from sqlalchemy import text
+    for t in [
+        'extracted_rows', 'extracted_tables', 'embeddings', 'chunks',
+        'judgment_paragraphs', 'parties', 'judgment_judges',
+        'judges', 'judgments', 'legal_nodes', 'legal_sections', 'legal_chapters',
+        'legal_parts', 'acts', 'pages', 'verification_findings', 'verification_runs',
+        'stage_events', 'ingestion_errors', 'duplicates', 'document_versions',
+        'ingestion_items', 'ingestion_batches', 'documents', 'sources'
+    ]:
+        try:
+            await session.execute(text(f'TRUNCATE TABLE {t} CASCADE;'))
+        except Exception:
+            pass
+    try:
+        await session.execute(text('TRUNCATE TABLE "references" CASCADE;'))
+    except Exception:
+        pass
+    await session.commit()
+
+    storage_root = Path(settings.reference_dir)
+    uploads_dir = storage_root / ".web-uploads"
+    if uploads_dir.exists():
+        shutil.rmtree(uploads_dir, ignore_errors=True)
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    return {"status": "SUCCESS", "message": "All database tables and documents have been wiped clean."}
+
+
+
+@api_router.post("/documents/{document_id}/extract-tables", response_model=list[ExtractedTableSummaryResponse], tags=["universal-tables"])
+async def trigger_document_table_extraction(
+    document_id: UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[ExtractedTableSummaryResponse]:
+    document = await session.scalar(
+        select(Document).options(selectinload(Document.pages)).where(Document.id == document_id)
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not document.pages:
+        raise HTTPException(status_code=400, detail="Document has no extracted pages")
+
+    sorted_pages = sorted(document.pages, key=lambda p: p.page_number)
+    analysis = await extract_with_groq(sorted_pages, document.filename)
+
+    # Update document metadata
+    doc_meta = dict(document.metadata_json or {})
+    doc_meta["detected_category"] = analysis.document_category
+    doc_meta["ai_summary"] = analysis.summary
+    doc_meta["key_entities"] = analysis.key_entities
+    doc_meta["extraction_model"] = analysis.model_used
+    document.metadata_json = doc_meta
+
+    if analysis.title and (not document.title or document.title == document.filename):
+        document.title = analysis.title
+    if analysis.document_date and not document.document_date:
+        try:
+            document.document_date = datetime.strptime(str(analysis.document_date)[:10], "%Y-%m-%d").date()
+        except Exception:
+            pass
+
+    # Create new tables and rows
+    created_tables: list[ExtractedTable] = []
+    for t_res in analysis.tables:
+        table_entity = ExtractedTable(
+            document_id=document.id,
+            table_name=t_res.table_name,
+            table_slug=t_res.table_slug,
+            document_category=analysis.document_category,
+            description=t_res.description,
+            columns=t_res.columns,
+            row_count=len(t_res.rows),
+        )
+        session.add(table_entity)
+        await session.flush()
+
+        for r_idx, r_data in enumerate(t_res.rows, start=1):
+            clean_data = dict(r_data)
+            source_p = clean_data.pop("source_page", 1) if isinstance(clean_data, dict) else 1
+            row_entity = ExtractedRow(
+                table_id=table_entity.id,
+                row_index=r_idx,
+                data=clean_data,
+                source_page=int(source_p) if isinstance(source_p, (int, str)) and str(source_p).isdigit() else 1,
+                confidence=0.95,
+            )
+            session.add(row_entity)
+        await session.flush()
+        created_tables.append(table_entity)
+
+    await session.commit()
+
+    return [
+        ExtractedTableSummaryResponse(
+            id=t.id,
+            document_id=t.document_id,
+            document_title=document.title,
+            document_filename=document.filename,
+            document_category=t.document_category,
+            table_name=t.table_name,
+            table_slug=t.table_slug,
+            description=t.description,
+            columns=[ExtractedColumnDefinition(**c) for c in (t.columns or [])],
+            row_count=t.row_count,
+            created_at=t.created_at,
+        )
+        for t in created_tables
+    ]
+
+
+@api_router.get("/config/groq", response_model=GroqConfigResponse, tags=["config"])
+async def get_groq_config() -> GroqConfigResponse:
+    settings = get_settings()
+    configured = bool(settings.groq_api_key)
+    return GroqConfigResponse(
+        configured=configured,
+        model=settings.groq_model,
+        available_models=["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+    )
+
+
+@api_router.post("/config/groq", response_model=GroqConfigResponse, tags=["config"])
+async def update_groq_config(payload: GroqConfigUpdateRequest) -> GroqConfigResponse:
+    settings = get_settings()
+    if payload.api_key:
+        settings.groq_api_key = payload.api_key.strip()
+    if payload.model:
+        settings.groq_model = payload.model.strip()
+    return GroqConfigResponse(
+        configured=bool(settings.groq_api_key),
+        model=settings.groq_model,
+        available_models=["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+    )
+

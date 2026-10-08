@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 
 
 class HealthComponent(BaseModel):
@@ -273,3 +275,69 @@ class SearchResponse(BaseModel):
     mode: str
     hits: list[SearchHit]
     embedding_status: str
+
+
+class ExtractedColumnDefinition(BaseModel):
+    key: str
+    label: str
+    type: str = "string"
+
+
+class ExtractedTableRowResponse(BaseModel):
+    id: UUID
+    table_id: UUID
+    row_index: int
+    data: dict[str, Any]
+    source_page: int | None = 1
+    confidence: float | None = 0.95
+
+
+class ExtractedTableSummaryResponse(BaseModel):
+    id: UUID
+    document_id: UUID
+    document_title: str | None = None
+    document_filename: str = ""
+    document_category: str = "General Document"
+    table_name: str
+    table_slug: str
+    description: str | None = None
+    columns: list[ExtractedColumnDefinition]
+    row_count: int
+    created_at: datetime
+
+
+class ExtractedTableDetailResponse(BaseModel):
+    table: ExtractedTableSummaryResponse
+    rows: list[ExtractedTableRowResponse]
+    total_rows: int
+    offset: int
+    limit: int
+
+
+class RowCreateRequest(BaseModel):
+    data: dict[str, Any]
+    source_page: int | None = 1
+
+
+class RowUpdateRequest(BaseModel):
+    data: dict[str, Any]
+
+
+class GroqConfigResponse(BaseModel):
+    configured: bool
+    model: str
+    available_models: list[str]
+
+
+class GroqConfigUpdateRequest(BaseModel):
+    api_key: str | None = None
+    model: str | None = None
+
+
+ExtractedTableRowResponse.model_rebuild()
+ExtractedTableSummaryResponse.model_rebuild()
+ExtractedTableDetailResponse.model_rebuild()
+RowCreateRequest.model_rebuild()
+RowUpdateRequest.model_rebuild()
+
+
